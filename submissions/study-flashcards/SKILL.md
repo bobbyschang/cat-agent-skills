@@ -34,16 +34,6 @@ the source material actually says.
 - The user wants general knowledge quizzed with no source material of their own — this skill
   exists specifically to test recall of THEIR material, not trivia.
 
-## Quick Start
-```
-User: "Make flashcards from this chapter and quiz me on it"
-1. Locate and read the source material (uploaded file, pasted text, or named notes)
-2. Extract atomic facts/concepts, one idea per card
-3. Build flashcards (front/back), grouped by topic
-4. Build a mixed-format quiz (multiple choice, true/false, short answer) with an answer key
-5. Present both, and flag any gaps in coverage rather than inventing content
-```
-
 ## Core Instructions
 
 ### Step 1: Locate the Source Material
@@ -102,13 +92,20 @@ User: "Make flashcards from this chapter and quiz me on it"
   Give each flashcard a short, stable `id` (e.g. `c1`, `c2`) — the app uses it as the
   spaced-repetition storage key, so keep ids stable if the user asks you to regenerate or expand
   the same deck later.
+- Short-answer (`short`) items are self-checked in the app: the learner sees the expected
+  `answer` after submitting and marks themselves right or wrong. Write a concise model answer.
+- Treat every generated string as untrusted text, because it comes from the user's source
+  material. Serialize `STUDY_DATA` as JSON (e.g. `JSON.stringify`), then make it safe for an
+  inline `<script>` by replacing every `<` with `\u003c`, and U+2028 / U+2029 with `\u2028` /
+  `\u2029`. Never hand-write values into the script, and never let a literal `</script>` or
+  `<!--` appear inside the data block.
 - Keep the app logic below the `END STUDY DATA` marker unchanged when populating a guide. The
   bundled template already includes sandbox-safe progress storage; do not replace it with direct,
   unguarded `localStorage` access.
 - Deliver the filled-in file as a single, self-contained HTML file — it needs no server, no
   internet connection, and no build step; opening it in a browser is enough.
-- Before delivering, check that the replaced `STUDY_DATA` block is valid JavaScript, matches the
-  shape above, and that every quiz `answer` is valid for its type (an option index for `mc`,
+- Before delivering, check that the replaced `STUDY_DATA` block is valid JavaScript, contains no
+  raw `<` characters, matches the shape above, and that every quiz `answer` is valid for its type (an option index for `mc`,
   `true`/`false` for `tf`, text for `short`).
 - If your environment offers an HTML preview or browser tool, also open the file in a sandboxed
   preview (without `allow-same-origin`) and confirm card flipping, Skip/Shuffle,

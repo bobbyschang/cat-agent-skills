@@ -46,6 +46,7 @@
     transform-style: preserve-3d; transition: transform 0.45s ease;
   }
   .card.flipped { transform: rotateY(180deg); }
+  .card:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
   .card-face {
     position: absolute; inset: 0; backface-visibility: hidden; border-radius: 16px;
     background: var(--card-bg); border: 1px solid var(--border);
@@ -89,6 +90,10 @@
   .review-item.correct { border-color: var(--good); }
   .review-item.incorrect { border-color: var(--bad); }
   .source-tag { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .review-item.pending { border-color: var(--accent); }
+  .self-check { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .self-check button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: #fff; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .self-check button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -127,9 +132,11 @@
      repetition storage key) — keep IDs stable across regenerations of
      the same deck if you want progress to carry over.
    - quiz[].type is one of "mc" (multiple choice), "tf" (true/false),
-     or "short" (short answer, graded by loose text match).
+     or "short" (short answer, self-checked by the learner after submit).
    - "source" fields are optional but recommended — shown in the quiz
      review and used to ground every card/question back to the notes.
+   - Build this block with JSON.stringify and replace every "<" with
+     "\u003c" so source text can never close this <script> tag.
    ====================================================================== */
 const STUDY_DATA = {
   "title": "Sample Deck — French Revolution",
@@ -263,9 +270,9 @@ function renderFlash() {
   area.innerHTML = `
     <div class="progress-line">Card ${queueIndex + 1} of ${deckQueue.length}${showingAll ? " (review mode)" : ""}</div>
     <div class="card-scene">
-      <div class="card" id="flipCard">
-        <div class="card-face front"><span class="card-topic">${escapeHtml(card.topic || "")}</span>${escapeHtml(card.front)}<span class="card-hint">Click to flip</span></div>
-        <div class="card-face back"><span class="card-topic">${escapeHtml(card.topic || "")}</span>${escapeHtml(card.back)}</div>
+      <div class="card" id="flipCard" role="button" tabindex="0" aria-pressed="false">
+        <div class="card-face front"><span class="card-topic">${escapeHtml(card.topic || "")}</span>${escapeHtml(card.front)}<span class="card-hint">Click or press Enter to flip</span></div>
+        <div class="card-face back" aria-hidden="true"><span class="card-topic">${escapeHtml(card.topic || "")}</span>${escapeHtml(card.back)}</div>
       </div>
     </div>
     <div class="controls">
@@ -280,9 +287,16 @@ function renderFlash() {
     ${card.source ? `<div class="source-tag" style="text-align:center;margin-top:10px;">Source: ${escapeHtml(card.source)}</div>` : ""}
   `;
   const flipEl = document.getElementById("flipCard");
-  flipEl.addEventListener("click", () => {
-    flipEl.classList.toggle("flipped");
-    document.getElementById("rateRow").style.display = flipEl.classList.contains("flipped") ? "flex" : "none";
+  const flip = () => {
+    const flipped = flipEl.classList.toggle("flipped");
+    flipEl.setAttribute("aria-pressed", String(flipped));
+    flipEl.querySelector(".front").setAttribute("aria-hidden", String(flipped));
+    flipEl.querySelector(".back").setAttribute("aria-hidden", String(!flipped));
+    document.getElementById("rateRow").style.display = flipped ? "flex" : "none";
+  };
+  flipEl.addEventListener("click", flip);
+  flipEl.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); }
   });
   document.getElementById("shuffleBtn").addEventListener("click", () => {
     const rest = deckQueue.slice(queueIndex + 1);
@@ -305,23 +319,21 @@ function escapeHtml(s) {
 }
 
 /* ---------------- Quiz ---------------- */
-let quizAnswers = {};
-
 function renderQuiz() {
-  quizAnswers = {};
   const area = document.getElementById("quizArea");
   let html = "";
   STUDY_DATA.quiz.forEach((q, idx) => {
-    html += `<div class="quiz-q" data-qid="${q.id}"><h3>${idx + 1}. ${escapeHtml(q.question)}</h3>`;
+    const field = "q" + idx;
+    html += `<div class="quiz-q"><h3 id="${field}_label">${idx + 1}. ${escapeHtml(q.question)}</h3>`;
     if (q.type === "mc") {
       q.options.forEach((opt, oi) => {
-        html += `<label class="opt-row"><input type="radio" name="${q.id}" value="${oi}"> ${escapeHtml(opt)}</label>`;
+        html += `<label class="opt-row"><input type="radio" name="${field}" value="${oi}"> ${escapeHtml(opt)}</label>`;
       });
     } else if (q.type === "tf") {
-      html += `<label class="opt-row"><input type="radio" name="${q.id}" value="true"> True</label>
-               <label class="opt-row"><input type="radio" name="${q.id}" value="false"> False</label>`;
+      html += `<label class="opt-row"><input type="radio" name="${field}" value="true"> True</label>
+               <label class="opt-row"><input type="radio" name="${field}" value="false"> False</label>`;
     } else {
-      html += `<input type="text" class="short-input" name="${q.id}" placeholder="Type your answer">`;
+      html += `<input type="text" class="short-input" name="${field}" aria-labelledby="${field}_label" placeholder="Type your answer, then check it against the key after submitting">`;
     }
     html += `</div>`;
   });
@@ -331,46 +343,74 @@ function renderQuiz() {
 }
 
 function gradeQuiz() {
-  let correct = 0;
-  const results = STUDY_DATA.quiz.map(q => {
+  const results = STUDY_DATA.quiz.map((q, idx) => {
+    const field = "q" + idx;
     let userAnswer, isCorrect;
     if (q.type === "mc") {
-      const sel = document.querySelector(`input[name="${q.id}"]:checked`);
+      const sel = document.querySelector(`input[name="${field}"]:checked`);
       userAnswer = sel ? q.options[Number(sel.value)] : "(no answer)";
-      isCorrect = sel && Number(sel.value) === q.answer;
+      isCorrect = !!sel && Number(sel.value) === q.answer;
     } else if (q.type === "tf") {
-      const sel = document.querySelector(`input[name="${q.id}"]:checked`);
-      userAnswer = sel ? sel.value : "(no answer)";
-      isCorrect = sel && (sel.value === "true") === q.answer;
+      const sel = document.querySelector(`input[name="${field}"]:checked`);
+      userAnswer = sel ? (sel.value === "true" ? "True" : "False") : "(no answer)";
+      isCorrect = !!sel && (sel.value === "true") === q.answer;
     } else {
-      const inp = document.querySelector(`input[name="${q.id}"]`);
-      userAnswer = inp ? inp.value.trim() : "";
-      isCorrect = userAnswer.toLowerCase().includes(String(q.answer).toLowerCase().slice(0, Math.min(8, String(q.answer).length))) && userAnswer.length > 0;
+      const inp = document.querySelector(`input[name="${field}"]`);
+      userAnswer = inp && inp.value.trim() ? inp.value.trim() : "(no answer)";
+      // Short answers are self-checked: null until the learner marks it.
+      isCorrect = userAnswer === "(no answer)" ? false : null;
     }
-    if (isCorrect) correct++;
     return { q, userAnswer, isCorrect };
   });
-  const total = STUDY_DATA.quiz.length;
-  const scoreStr = `${correct}/${total}`;
-  progressStorage.setItem(quizScoreKey, scoreStr);
 
   const area = document.getElementById("quizArea");
-  let html = `<div class="result-banner ${correct === total ? "pass" : "fail"}">Score: ${scoreStr}</div>`;
+  let html = `<div class="result-banner" id="scoreBanner" role="status" aria-live="polite"></div>`;
   results.forEach((r, idx) => {
     const correctAnswerText = r.q.type === "mc" ? r.q.options[r.q.answer] : (r.q.type === "tf" ? (r.q.answer ? "True" : "False") : r.q.answer);
-    html += `<div class="review-item ${r.isCorrect ? "correct" : "incorrect"}">
+    const needsCheck = r.isCorrect === null;
+    html += `<div class="review-item ${needsCheck ? "pending" : (r.isCorrect ? "correct" : "incorrect")}" id="review${idx}">
       <strong>${idx + 1}. ${escapeHtml(r.q.question)}</strong><br>
       Your answer: ${escapeHtml(String(r.userAnswer))}<br>
-      ${r.isCorrect ? "" : `Correct answer: ${escapeHtml(String(correctAnswerText))}<br>`}
+      ${r.isCorrect === true ? "" : `${needsCheck ? "Expected answer" : "Correct answer"}: ${escapeHtml(String(correctAnswerText))}<br>`}
+      ${needsCheck ? `<div class="self-check" role="group" aria-label="Mark question ${idx + 1}">
+        <button type="button" data-idx="${idx}" data-mark="right" aria-pressed="false">I got it right</button>
+        <button type="button" data-idx="${idx}" data-mark="wrong" aria-pressed="false">I missed it</button>
+      </div>` : ""}
       ${r.q.source ? `<span class="source-tag">Source: ${escapeHtml(r.q.source)}</span>` : ""}
     </div>`;
   });
   html += `<button class="quiz-submit tab-btn active" id="retakeQuiz">Retake quiz</button>`;
   area.innerHTML = html;
-  document.getElementById("retakeQuiz").addEventListener("click", renderQuiz);
-  refreshDashboard();
-}
 
+  const updateScore = () => {
+    const total = results.length;
+    const correct = results.filter(r => r.isCorrect === true).length;
+    const pending = results.filter(r => r.isCorrect === null).length;
+    const scoreStr = `${correct}/${total}`;
+    const banner = document.getElementById("scoreBanner");
+    banner.className = "result-banner " + (pending ? "" : (correct === total ? "pass" : "fail"));
+    banner.textContent = pending
+      ? `Score so far: ${scoreStr} (${pending} short answer${pending > 1 ? "s" : ""} left to self-check)`
+      : `Score: ${scoreStr}`;
+    if (!pending) progressStorage.setItem(quizScoreKey, scoreStr);
+    refreshDashboard();
+  };
+
+  area.querySelectorAll(".self-check button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.idx);
+      const right = btn.dataset.mark === "right";
+      results[idx].isCorrect = right;
+      const item = document.getElementById("review" + idx);
+      item.classList.remove("pending", "correct", "incorrect");
+      item.classList.add(right ? "correct" : "incorrect");
+      item.querySelectorAll(".self-check button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+      updateScore();
+    });
+  });
+  document.getElementById("retakeQuiz").addEventListener("click", renderQuiz);
+  updateScore();
+}
 /* ---------------- Init ---------------- */
 buildQueue();
 renderFlash();
