@@ -1,17 +1,14 @@
 # Study Flashcards
 
-Hand your agent a chapter, a lecture deck, meeting notes, or a certification study guide and get back
-study aids built **only** from that material — no invented facts, no general-knowledge trivia.
+Give your agent a chapter, a lecture deck, some meeting notes, or a cert study guide, and it builds
+flashcards and a practice quiz from that material. If the content is not in your source, it won't
+show up on a card.
 
 ## What you get
 
-- **Flashcards** — one atomic fact per card, grouped by topic, each traceable to a page, slide, or heading.
-- **Practice quiz** — a mix of multiple-choice, true/false, and short-answer questions, with a separate answer key.
-- **Interactive study app** (default when you ask for a "guide" or "study guide") — a single, self-contained
-  HTML file with flip cards, Again/Good/Easy spaced-repetition scheduling, a self-graded quiz, and a small
-  progress dashboard. It needs no server, no internet connection, and no build step: just open it in a browser.
-
-Prefer something else? Ask for Word, PDF, printable, markdown, or an in-chat answer and the skill will use that format instead.
+- Flashcards with one fact per card, grouped by topic. Each card notes where it came from (page, slide, or heading).
+- A practice quiz that mixes multiple choice, true/false, and a few short-answer questions. The answer key is kept separate so you can actually test yourself.
+- An interactive study app as a single HTML file, no install needed. If you'd rather have Word or PDF, just note it and you'll get that instead.
 
 ## Try it
 
@@ -19,8 +16,8 @@ Prefer something else? Ask for Word, PDF, printable, markdown, or an in-chat ans
 - "Make flashcards from these lecture slides and quiz me on chapter 3."
 - "Turn these notes into a printable quiz with an answer key."
 
-## Good to know
+## A few things to know
 
-- If the source doesn't cover something you asked about, the skill says so rather than filling the gap.
-- If the source conflicts with common knowledge, it follows the source (that's what you'll be tested on) and flags the discrepancy.
-- Progress in the HTML app is saved in the browser when storage is available; the app still works in sandboxed previews where it isn't.
+- If you ask about something your source doesn't cover, it'll tell you instead of making something up.
+- If your source disagrees with what's commonly known, it goes with your source (that's what you'll be tested on) and points out the difference.
+- The HTML app saves your progress in the browser when it can. In locked-down previews where storage is blocked, it still works; it just won't remember where you left off.
