@@ -13,7 +13,8 @@ flyer. It also handles QR code variations: Wi-Fi network, contact card
 - Optional QR code style selection of: 8 body shapes, 5 corner-eye styles,
   5 corner-eye centers, 4 outer frames, brand color, logo in the middle,
   and a caption underneath.
-- Batch mode: upload a CSV or XLSX and get one QR code per row.
+- Batch mode: upload a CSV (or an Excel file, when your environment can read one)
+  and get one QR code per row.
 
 ## How it works
 

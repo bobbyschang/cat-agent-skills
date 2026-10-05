@@ -31,7 +31,7 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 | Rule | Detail |
 |---|---|
 | Skill folder | `<skill-dir>` = the folder this SKILL.md was loaded from. Engine: `scripts/make_qr.py`; style guide: `assets/qr-style-guide.png` (both relative to `<skill-dir>`). If unknown, search `**/qr-code-builder/scripts/make_qr.py` and use its grandparent. Use absolute paths in commands |
-| Libraries | Pillow + one QR encoder (ReportLab, `qrcode` or `segno`, first found). **Never** `pip install`; never write your own encoder |
+| Libraries | Pillow + one QR encoder (ReportLab, `qrcode` or `segno`, first found). **Never** `pip install`; never write your own encoder. The engine reads **CSV only** for bulk (XLSX: see Bulk) |
 | No separate check | The generation run reports `encoder` and returns `missing_encoder` / `missing_pillow` itself. Run `python '<skill-dir>/scripts/make_qr.py' --check` ONLY after one of those errors (or another encoder/Pillow error), or on the Customize path to read `vector_pdf` before answering a PDF question |
 | One command | `mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' …` in ONE call. No extra verification calls — the JSON is the check |
 | **Safe commands (security)** | Never put a user-derived value — URL, caption, frame text, color, logo path, output name, Wi-Fi / contact / event fields, CSV column names — raw or inside double quotes into a shell string: `$(…)`, backticks and `$VAR` still run inside `"…"`. **Prefer an argument list** when the host runs Python: `subprocess.run([sys.executable, script, "--url", url, …])`, one list item per value, never `shell=True`. **In a shell**, wrap every user value in single quotes and write each `'` inside it as `'\''` (e.g. `Bob's` → `'Bob'\''s'`). Quote `<skill-dir>`, `<scratch>` and file paths the same way. Fixed option names (`png`, `fluid`, `small`, `logo`) are safe as-is |
@@ -106,12 +106,45 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Text message | Phone; optional message | `--type sms --phone --body` |
 | Phone call | Phone number | `--type phone --phone` |
 | Map location | Latitude, longitude (geocode only a user-given address; confirm) | `--type geo --lat --lon` |
-| Calendar event | Title, start, end (`20261015T190000`), optional location | `--type event --summary --start --end --location` |
-| Bulk | Uploaded CSV/XLSX; which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --outdir DIR` |
+| Calendar event | Title, start, end (`20261015T190000`, or `20261015` for all-day — then the end is the day AFTER the last day), optional location. End must be after start | `--type event --summary --start --end --location` |
+| Bulk | Uploaded CSV (or XLSX, converted first — below); which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --outdir DIR` |
 
-Bulk: find the upload (ask if none); convert XLSX to CSV (openpyxl/pandas) into `<scratch>`; show the headers,
-ask for the two columns. Bare domains get `https://`; a bad or empty row doesn't stop the batch and is reported
-(never skipped). Every file name ends with its row number (e.g. `Alpha_001.png`), so names never collide.
+Bulk: find the upload (ask if none); show the headers, ask for the two columns. Bare domains get `https://`; a bad
+or empty row doesn't stop the batch and is reported (never skipped). Every file name ends with its row number
+(e.g. `Alpha_001.png`), so names never collide. Non-UTF-8 CSVs (Excel's classic "CSV (Comma delimited)") are read
+as Windows text with a warning.
+
+**XLSX uploads** — the engine is CSV-only, so convert first, and ONLY if a reader is importable. Run this ONE command
+(paths passed as arguments, single-quoted); it never installs anything:
+```bash
+mkdir -p '<scratch>' && python - '<upload>.xlsx' '<scratch>-sheet.csv' <<'PY'
+import sys, csv
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    import openpyxl
+    rows = list(openpyxl.load_workbook(src, read_only=True, data_only=True).worksheets[0].iter_rows(values_only=True))
+except ImportError:
+    try:
+        import pandas as pd
+        rows = pd.read_excel(src, sheet_name=0, header=None, dtype=str).fillna("").values.tolist()
+    except ImportError:
+        print("NO_XLSX_READER"); sys.exit(0)
+    except Exception:
+        print("NO_XLSX_READER"); sys.exit(0)  # pandas present but no Excel engine
+except Exception:
+    print("XLSX_UNREADABLE"); sys.exit(0)
+with open(dst, "w", newline="", encoding="utf-8") as f:
+    csv.writer(f).writerows([["" if v is None else str(v) for v in r] for r in rows])
+print("CONVERTED")
+PY
+```
+| Result | Do |
+|---|---|
+| `CONVERTED` | Continue with `<scratch>-sheet.csv` — kept beside `<scratch>`, so that folder holds only QR files (first sheet only — say so if the workbook has several) |
+| `NO_XLSX_READER` | Stop the bulk flow; don't guess or hand-parse. Say: "I can't open Excel files here. In Excel choose **File › Save As › CSV UTF-8 (Comma delimited)** and upload that file." |
+| `XLSX_UNREADABLE` | Same message, noting the file couldn't be opened (it may be damaged or password-protected) |
+
+Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (the engine returns `not_csv` for them).
 
 ### Step 4 — Generate, read JSON, deliver
 1. **Run** in ONE command. `--out` is a base path without extension (dots like `contoso.com-qr` are kept).
@@ -147,17 +180,22 @@ ask for the two columns. Bare domains get `https://`; a bad or empty row doesn't
    | Code | Action |
    |---|---|
    | `invalid_url` / `missing_url` | Re-ask the web address |
-| `missing_field` / `invalid_field` | Re-ask ONLY the field the message names (e.g. Wi-Fi password unless the network is open; event times like `20261015T190000`; latitude/longitude numbers) |
-| `bad_column` / `batch_not_found` | Show the spreadsheet's columns (listed in the message) and re-ask / ask for the file again |
+   | `missing_field` / `invalid_field` | Re-ask ONLY the field the message names (e.g. Wi-Fi password unless the network is open; a real event date/time like `20261015T190000` with the end after the start; latitude/longitude numbers) |
+   | `bad_column` / `batch_not_found` | Show the spreadsheet's columns (listed in the message) and re-ask / ask for the file again |
+   | `not_csv` / `bad_csv` | Ask for a "CSV UTF-8 (Comma delimited)" export (for `.xlsx`, try the Bulk conversion first) |
    | `bad_color` | Re-ask that color (offer black or a hex) |
    | `logo_not_found` / `logo_unreadable` | Re-ask the logo, or continue without one (a fully transparent logo can't supply a color — offer a hex) |
    | `logo_svg` | Ask for a PNG or JPG logo |
    | `bad_format` | Re-ask the format (png, svg, pdf, jpg, webp) |
    | `no_logo` | Use black, say so |
    | `too_long` | Ask for a shorter link or less text |
+   | `bad_option` | An option is out of range or invalid (the message names it) — fix that value; if it came from the user, re-ask it |
+   | `cannot_write` | The output folder isn't writable — use a different scratch folder and rerun once; if it fails again, say so |
+   | `too_large` | Rerun with a smaller `--size` |
+   | `internal_error` | Say something went wrong; rerun ONCE with the standard look. If it fails again, stop and tell the user (never show the `detail` field) |
    | `missing_encoder` / `missing_pillow` | "This environment can't make QR codes (a required image or QR library is missing)." Stop; ask nothing more (optionally one `--check` to confirm) |
 
-   **Warnings to explain:** low contrast (code, eyes, frame); inverted light-on-dark; margin under 4 squares;
+   **Warnings to explain** (batch: a top-level `warnings` list may also note the CSV encoding): low contrast (code, eyes, frame); inverted light-on-dark; margin under 4 squares;
    squares under 4 px (bigger size); emoji/CJK text may show as boxes; caption shown smaller on several lines / banner text too long (offer to shorten); error correction raised for the logo;
    "fg taken from logo: #…" (name it); "The SVG/PDF leaves out: …" (name each listed option; offer PNG for the styled version); PDF is a 300-dpi image (fine for print); failed
    scan test. Tiny caption text in the preview = no TrueType font here; say so.

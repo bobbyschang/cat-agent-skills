@@ -12,7 +12,8 @@ Examples:
   python make_qr.py --type url --url https://contoso.com --logo logo.png --style rounded --fg "#0B3D91" --format png,svg,pdf --out out/brand
   python make_qr.py --batch people.csv --data-column url --name-column name --format png --outdir out/batch
 """
-import argparse, re, base64, csv, io, json, os, sys
+import argparse, re, base64, csv, io, json, os, sys, tempfile
+from datetime import datetime
 from urllib.parse import quote
 from urllib.parse import urlsplit
 
@@ -77,6 +78,22 @@ REQUIRED_FIELDS = {"text": ["text"], "wifi": ["ssid"], "vcard": ["name"], "email
                    "phone": ["phone"], "sms": ["phone"], "geo": ["lat", "lon"],
                    "event": ["summary", "start", "end"]}
 
+def parse_event_time(raw, label):
+    """Return (datetime, kind, utc) for an iCalendar DATE (20261015) or DATE-TIME (20261015T190000[Z]).
+    Dashes/colons are allowed (2026-10-15T19:00:00). Impossible dates/times raise invalid_field."""
+    v = (raw or "").strip().replace("-", "").replace(":", "")
+    utc = v.upper().endswith("Z")
+    core = v[:-1] if utc else v
+    m = re.fullmatch(r"(\d{8})(?:T(\d{6}))?", core)
+    if not m or (utc and not m.group(2)):
+        raise QRError("invalid_field", f"The event {label} \"{raw}\" should look like 20261015T190000 (date and time) or 20261015 (all-day).")
+    try:
+        if m.group(2):
+            return datetime.strptime(core, "%Y%m%dT%H%M%S"), "datetime", utc
+        return datetime.strptime(core, "%Y%m%d"), "date", False
+    except ValueError:
+        raise QRError("invalid_field", f"The event {label} \"{raw}\" isn't a real date/time (check the month, day and hour - e.g. 20261015T190000 is 15 Oct 2026, 7:00 pm).")
+
 def _wifi_auth(a):
     auth = (a.auth or "WPA").strip().upper()
     return "nopass" if auth in ("NONE", "OPEN", "NOPASS") else auth
@@ -108,10 +125,15 @@ def validate_fields(a):
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise QRError("invalid_field", "Latitude must be between -90 and 90, and longitude between -180 and 180.")
     if t == "event":
-        for f in ("start", "end"):
-            v = getattr(a, f).strip().replace("-", "").replace(":", "")
-            if not re.fullmatch(r"\d{8}(T\d{6}Z?)?", v):
-                raise QRError("invalid_field", f"The event {f} time \"{getattr(a, f)}\" should look like 20261015T190000 (or 2026-10-15T19:00:00).")
+        start, end = parse_event_time(a.start, "start"), parse_event_time(a.end, "end")
+        if start[1] != end[1]:
+            raise QRError("invalid_field", "The event start and end must both be all-day dates (20261015) or both be date-and-times (20261015T190000).")
+        if start[2] != end[2]:
+            raise QRError("invalid_field", "The event start and end must both use UTC (ending in Z) or both use local time - not one of each.")
+        if end[0] <= start[0]:
+            if start[1] == "date":
+                raise QRError("invalid_field", f"The event must end after it starts. For an all-day event the end is the day AFTER the last day (e.g. start {a.start.strip()} -> end the next day).")
+            raise QRError("invalid_field", f"The event must end after it starts (start {a.start.strip()}, end {a.end.strip()}).")
 
 def build_payload(a):
     t = a.type
@@ -150,8 +172,10 @@ def build_payload(a):
     if t == "geo":
         return f"geo:{float(a.lat)},{float(a.lon)}"
     if t == "event":
-        def dt(s): return s.strip().replace("-", "").replace(":", "")
-        lines = ["BEGIN:VEVENT", f"SUMMARY:{_vtext(a.summary.strip())}", f"DTSTART:{dt(a.start)}", f"DTEND:{dt(a.end)}"]
+        def dt(name, s):
+            v = s.strip().replace("-", "").replace(":", "").upper()
+            return f"{name};VALUE=DATE:{v}" if "T" not in v else f"{name}:{v}"  # RFC 5545: all-day needs VALUE=DATE
+        lines = ["BEGIN:VEVENT", f"SUMMARY:{_vtext(a.summary.strip())}", dt("DTSTART", a.start), dt("DTEND", a.end)]
         if a.location: lines.append(f"LOCATION:{_vtext(a.location)}")
         lines.append("END:VEVENT")
         return "\n".join(lines)
@@ -203,6 +227,7 @@ EYE_FRAMES = ["square", "rounded", "extra-rounded", "circle", "leaf"]
 EYE_CENTERS = ["square", "rounded", "circle", "diamond", "leaf"]
 FRAMES = ["none", "box", "rounded-box", "banner"]
 SS = 4  # supersampling factor for smooth curves
+MAX_CANVAS = 6000  # max supersampled canvas edge in px (a 1000 px code keeps the full 4x)
 
 def _finder_origins(n):
     return [(0, 0), (0, n - 7), (n - 7, 0)]
@@ -235,7 +260,9 @@ def _shape(d, box, kind, fill, idx=0):
 
 def render_code(m, size, border, fg, bg, body, eye_frame, eye_center, eye_color, logo, logo_scale):
     n = len(m); total = n + 2 * border
-    box = max(1, size // total); b = box * SS; px = b * total
+    box = max(1, size // total)
+    ss = max(1, min(SS, MAX_CANVAS // max(1, box * total)))  # keep the supersampled canvas memory-bounded
+    b = box * ss; px = b * total
     bgc = _rgba(bg); fgc = _rgba(fg); eyec = _rgba(eye_color or fg)
     img = Image.new("RGBA", (px, px), bgc)
     d = ImageDraw.Draw(img)
@@ -281,7 +308,7 @@ def render_code(m, size, border, fg, bg, body, eye_frame, eye_center, eye_color,
         target = int(n * b * logo_scale)
         k = target / max(lg.width, lg.height)  # scale up OR down to the requested size
         lg = lg.resize((max(1, int(lg.width * k)), max(1, int(lg.height * k))), Image.LANCZOS)
-        pad = max(4 * SS, b)
+        pad = max(4 * ss, b)
         cx = cy = px // 2
         plate = [cx - lg.width // 2 - pad, cy - lg.height // 2 - pad, cx + lg.width // 2 + pad, cy + lg.height // 2 + pad]
         d.rounded_rectangle(plate, radius=pad, fill=bgc if bgc[3] else (255, 255, 255, 255))
@@ -550,9 +577,17 @@ def normalize_url(raw):
         raise QRError("missing_url", "A web address is required.")
     if any(ch.isspace() for ch in u):
         raise QRError("invalid_url", f"The web address \"{u}\" contains a space, so the code would open a broken link. Check the address and try again.")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in u):
+        raise QRError("invalid_url", "The web address contains hidden control characters. Please retype or re-paste it.")
     if not u.lower().startswith(("http://", "https://")):
         u = "https://" + u
-    host = urlsplit(u).hostname or ""
+    try:
+        parts = urlsplit(u)
+        host, port = parts.hostname or "", parts.port  # .port raises ValueError for out-of-range / non-numeric ports
+    except ValueError:
+        raise QRError("invalid_url", f"\"{raw}\" isn't a valid web address (the part after https:// is malformed). Check it and try again.")
+    if port == 0:
+        raise QRError("invalid_url", f"\"{raw}\" has an invalid port number (:0).")
     if "." not in host and host != "localhost":
         raise QRError("invalid_url", f"\"{raw}\" doesn't look like a web address (expected something like contoso.com).")
     return u
@@ -565,22 +600,34 @@ def check_color(name, value):
     except ValueError:
         raise QRError("bad_color", f"\"{value}\" isn't a color I recognize for {name}. Use a hex code like #5C3A21 or a basic name like navy.")
 
+def _fully_load(path):
+    """verify() only checks headers; a full decode also catches truncated or corrupt image data."""
+    with Image.open(path) as im:
+        im.verify()
+    with Image.open(path) as im:
+        im.load()
+
 def check_logo(path):
     if not os.path.isfile(path):
         raise QRError("logo_not_found", f"I couldn't find the logo file \"{path}\".")
+    name = os.path.basename(path)
+    if path.lower().endswith((".svg", ".svgz")):
+        try:
+            import cairosvg
+        except (ImportError, OSError):  # OSError: cairosvg installed but the Cairo system library is missing
+            raise QRError("logo_svg", "SVG logos can't be read here. Please attach the logo as a PNG (preferably with a transparent background) or JPG.")
+        # Convert into a private temp folder - never next to the upload, which may be read-only or hold a same-named file.
+        try:
+            png = os.path.join(tempfile.mkdtemp(prefix="qr_logo_"), os.path.splitext(name)[0] + ".png")
+            cairosvg.svg2png(url=path, write_to=png, output_width=800)
+            _fully_load(png)
+        except Exception:  # malformed/unsupported SVG, unwritable temp, or an unreadable result
+            raise QRError("logo_unreadable", f"The SVG logo \"{name}\" couldn't be converted to an image. Please attach the logo as a PNG or JPG instead.")
+        return png
     try:
-        with Image.open(path) as im:
-            im.verify()
+        _fully_load(path)
     except Exception:
-        if path.lower().endswith(".svg"):
-            try:
-                import cairosvg
-                png = os.path.splitext(path)[0] + "_converted.png"
-                cairosvg.svg2png(url=path, write_to=png, output_width=800)
-                return png
-            except ImportError:
-                raise QRError("logo_svg", "SVG logos can't be read here. Please attach the logo as a PNG (preferably with a transparent background) or JPG.")
-        raise QRError("logo_unreadable", f"The logo \"{os.path.basename(path)}\" couldn't be opened as an image. Please attach a PNG or JPG.")
+        raise QRError("logo_unreadable", f"The logo \"{name}\" couldn't be opened as an image (it may be damaged or not an image). Please attach a PNG or JPG.")
     return path
 
 UNSUPPORTED_GLYPH_START = 0x2E80  # CJK and later blocks are missing from the bundled fonts
@@ -631,6 +678,19 @@ def contrast_warning(fg, bg, label="code"):
     if ratio < 4: warn.append(f"Low contrast for the {label} ({ratio:.1f}:1) - aim for 4:1 or higher.")
     return warn
 
+LIMITS = {"size": (100, 5000, "px"), "pdf_size": (36, 2000, "pt"), "border": (0, 20, "squares"),
+          "logo_scale": (0.05, 0.30, "of the code width")}
+
+def check_options(a):
+    for key, (lo, hi, unit) in LIMITS.items():
+        v = getattr(a, key)
+        if key == "logo_scale" and (a.logo_size or not a.logo):
+            continue  # --logo-size overrides it; ignored without a logo
+        if key == "logo_scale" and v > hi:
+            continue  # capped to 0.30 later with a warning (existing behavior)
+        if not (lo <= v <= hi):
+            raise QRError("bad_option", f"--{key.replace('_', '-')} {v:g} is out of range - use {lo:g} to {hi:g} {unit}.")
+
 def make_one(data, a, out_base):
     ec = a.ec
     warnings = []
@@ -668,33 +728,39 @@ def make_one(data, a, out_base):
     root, ext = os.path.splitext(out_base)
     if ext.lower().lstrip(".") not in RASTER | VECTOR:
         root = out_base  # keep dots that are part of the name (e.g. contoso.com-qr)
-    os.makedirs(os.path.dirname(root) or ".", exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(root) or ".", exist_ok=True)
+    except OSError as e:
+        raise QRError("cannot_write", f"I couldn't create the output folder \"{os.path.dirname(root)}\" ({e.strerror or e}).")
     files = []
     raster_img = None
-    for f in fmts:
-        path = f"{root}.{f}"
-        if f in RASTER:
-            if raster_img is None:
-                code_img = render_code(m, a.size, a.border, a.fg, a.bg, a.style, a.eye_frame, a.eye_center, a.eye_color, a.logo, a.logo_scale)
-                readback = readback_check(code_img, m, a.size, a.border, ec)
-                code_img = pad_to_size(code_img, a.size, a.bg)
-                raster_img = decorate(code_img, a.fg, a.bg, a.frame, a.frame_text, a.caption, a.frame_color, warnings)
-            if f in ("jpg", "jpeg") and a.bg in ("transparent", "none"):
-                warnings.append("JPG cannot be transparent - used white background.")
-            save_raster(raster_img, path, f, a.bg)
-        elif f == "svg":
-            dropped = vector_unsupported(a, "svg")
-            if dropped: warnings.append(f"The SVG leaves out: {', '.join(dropped)} - SVG is a plain square code; these apply to PNG/JPG/WEBP.")
-            render_svg(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.size)
-        elif f == "pdf":
-            dropped = vector_unsupported(a, "pdf")
-            if dropped: warnings.append(f"The PDF leaves out: {', '.join(dropped)} - PDF is a plain square code (caption included); these apply to PNG/JPG/WEBP.")
-            if HAS_REPORTLAB:
-                render_pdf(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
-            else:
-                render_pdf_pillow(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
-                warnings.append("ReportLab isn't installed here, so the PDF holds a high-resolution (300 dpi) image of the code rather than vector shapes - still fine for printing.")
-        files.append(path)
+    try:
+        for f in fmts:
+            path = f"{root}.{f}"
+            if f in RASTER:
+                if raster_img is None:
+                    code_img = render_code(m, a.size, a.border, a.fg, a.bg, a.style, a.eye_frame, a.eye_center, a.eye_color, a.logo, a.logo_scale)
+                    readback = readback_check(code_img, m, a.size, a.border, ec)
+                    code_img = pad_to_size(code_img, a.size, a.bg)
+                    raster_img = decorate(code_img, a.fg, a.bg, a.frame, a.frame_text, a.caption, a.frame_color, warnings)
+                if f in ("jpg", "jpeg") and a.bg in ("transparent", "none"):
+                    warnings.append("JPG cannot be transparent - used white background.")
+                save_raster(raster_img, path, f, a.bg)
+            elif f == "svg":
+                dropped = vector_unsupported(a, "svg")
+                if dropped: warnings.append(f"The SVG leaves out: {', '.join(dropped)} - SVG is a plain square code; these apply to PNG/JPG/WEBP.")
+                render_svg(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.size)
+            elif f == "pdf":
+                dropped = vector_unsupported(a, "pdf")
+                if dropped: warnings.append(f"The PDF leaves out: {', '.join(dropped)} - PDF is a plain square code (caption included); these apply to PNG/JPG/WEBP.")
+                if HAS_REPORTLAB:
+                    render_pdf(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
+                else:
+                    render_pdf_pillow(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
+                    warnings.append("ReportLab isn't installed here, so the PDF holds a high-resolution (300 dpi) image of the code rather than vector shapes - still fine for printing.")
+            files.append(path)
+    except OSError as e:
+        raise QRError("cannot_write", f"I couldn't save the QR code file ({e.strerror or e}). Check that the output folder exists and is writable.")
     rb = locals().get("readback")
     dc = None
     first_raster = next((p for p in files if p.rsplit(".", 1)[-1] in RASTER), None)
@@ -708,8 +774,13 @@ def make_one(data, a, out_base):
             "modules": len(m), "error_correction": ec, "encoder": ENCODER,
             "files": files, "warnings": list(dict.fromkeys(warnings))}
 
+class _JsonArgParser(argparse.ArgumentParser):
+    def error(self, message):  # bad/unknown option -> the documented JSON error, not usage text on stderr
+        print(json.dumps({"error": "bad_option", "message": f"Invalid option: {message}."}, indent=2))
+        sys.exit(2)
+
 def main():
-    p = argparse.ArgumentParser()
+    p = _JsonArgParser()
     p.add_argument("--check", action="store_true", help="report what this environment supports, then exit")
     p.add_argument("--type", default="url", choices=["url", "text", "wifi", "vcard", "email", "phone", "sms", "geo", "event"])
     for k in ["url", "text", "ssid", "password", "auth", "name", "org", "title", "phone", "email", "address",
@@ -739,22 +810,56 @@ def main():
     if a.check:
         print(json.dumps(environment_report(), indent=2)); return
     try:
+        check_options(a)
         run(a)
     except QRError as e:
         print(json.dumps({"error": e.code, "message": e.message}, indent=2)); sys.exit(2)
+    except MemoryError:
+        print(json.dumps({"error": "too_large", "message": "Not enough memory to draw a code this large - use a smaller --size."}, indent=2)); sys.exit(2)
+    except Exception as e:  # last-resort guard: the caller always gets JSON, never a traceback
+        print(json.dumps({"error": "internal_error", "message": "Something unexpected went wrong while making the QR code. Try again with simpler options.",
+                          "detail": f"{type(e).__name__}: {str(e)[:200]}"}, indent=2)); sys.exit(2)
+
+def read_csv_text(path):
+    """Decode a CSV the way spreadsheets actually save it: UTF-8 (with or without BOM), else Windows-1252
+    (Excel's classic "CSV (Comma delimited)"). Binary / non-text files raise bad_csv."""
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        raise QRError("batch_not_found", f"I couldn't open the spreadsheet file \"{path}\" ({e.strerror or e}).")
+    if b"\x00" in raw:
+        raise QRError("bad_csv", "That file isn't a text CSV (it looks like a binary or Excel file). Save the sheet as \"CSV UTF-8 (Comma delimited)\" and upload it again.")
+    try:
+        return raw.decode("utf-8-sig"), None
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("cp1252"), "The CSV wasn't saved as UTF-8, so it was read as Windows (Excel) text - check that accented names look right."
+    except UnicodeDecodeError:
+        raise QRError("bad_csv", "The CSV's text encoding couldn't be read. Save the sheet as \"CSV UTF-8 (Comma delimited)\" and upload it again.")
 
 def run(a):
     if a.batch:
         results = []
         if not os.path.isfile(a.batch):
             raise QRError("batch_not_found", f"I couldn't find the spreadsheet file \"{a.batch}\".")
-        with open(a.batch, newline="", encoding="utf-8-sig") as fh:
-            reader = csv.DictReader(fh)
-            cols = reader.fieldnames or []
+        if a.batch.lower().endswith((".xlsx", ".xlsm", ".xls", ".ods", ".numbers")):
+            raise QRError("not_csv", "The QR engine reads CSV files only. Convert the spreadsheet to CSV first, or save it as \"CSV UTF-8 (Comma delimited)\" and upload that.")
+        text, enc_note = read_csv_text(a.batch)
+        try:
+            rows = list(csv.DictReader(io.StringIO(text, newline="")))
+            cols = list(csv.DictReader(io.StringIO(text, newline="")).fieldnames or [])
+        except csv.Error as e:
+            raise QRError("bad_csv", f"The file couldn't be read as a CSV spreadsheet ({e}). Save it as \"CSV UTF-8 (Comma delimited)\" and upload it again.")
+        if True:
             for col in [a.data_column] + ([a.name_column] if a.name_column else []):
                 if col not in cols:
                     raise QRError("bad_column", f"The spreadsheet has no column named \"{col}\". Its columns are: {', '.join(cols) or '(none)'}.")
-            for i, row in enumerate(reader, 1):
+            try:
+                os.makedirs(a.outdir, exist_ok=True)
+            except OSError as e:
+                raise QRError("cannot_write", f"I couldn't create the output folder \"{a.outdir}\" ({e.strerror or e}).")
+            for i, row in enumerate(rows, 1):
                 data = (row.get(a.data_column) or "").strip()
                 name = ((row.get(a.name_column) or "") if a.name_column else "").strip()
                 if not data:
@@ -772,7 +877,9 @@ def run(a):
                 except QRError as e:
                     results.append({"row": i, "name": name, "error": e.code, "message": e.message})
         ok = sum(1 for r in results if "error" not in r)
-        print(json.dumps({"rows": len(results), "count": ok, "failed": len(results) - ok, "results": results}, indent=2))
+        out = {"rows": len(results), "count": ok, "failed": len(results) - ok, "results": results}
+        if enc_note: out["warnings"] = [enc_note]
+        print(json.dumps(out, indent=2))
     else:
         print(json.dumps(make_one(build_payload(a), a, a.out), indent=2))
 
