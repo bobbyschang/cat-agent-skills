@@ -8,8 +8,8 @@ flyer. It also handles QR code variations: Wi-Fi network, contact card
 ## What you get
 
 - PNG, SVG, PDF, JPG, and/or WEBP files of the QR code.
-- A readability check so you know the code will actually scan before
-  you print it.
+- A readability estimate so you can catch problems before you print, plus a real
+  decode test when a QR reader is available in your environment.
 - Optional QR code style selection of: 8 body shapes, 5 corner-eye styles,
   5 corner-eye centers, 4 outer frames, brand color, logo in the middle,
   and a caption underneath.

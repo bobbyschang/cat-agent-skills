@@ -14,7 +14,7 @@ description: |
 
 # QR Code Builder
 
-Make a scannable QR code with as few questions as possible. **The only required input is the web address** (or
+Make a QR code with as few questions as possible. **The only required input is the web address** (or
 the details of a type the user explicitly asked for); every look-and-feel choice is optional and never blocks.
 
 ## When NOT to use
@@ -32,8 +32,9 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 |---|---|
 | Skill folder | `<skill-dir>` = the folder this SKILL.md was loaded from. Engine: `scripts/make_qr.py`; style guide: `assets/qr-style-guide.png` (both relative to `<skill-dir>`). If unknown, search `**/qr-code-builder/scripts/make_qr.py` and use its grandparent. Use absolute paths in commands |
 | Libraries | Pillow + one QR encoder (ReportLab, `qrcode` or `segno`, first found). **Never** `pip install`; never write your own encoder |
-| No separate check | The generation run reports `encoder` and returns `missing_encoder` / `missing_pillow` itself. Run `python <skill-dir>/scripts/make_qr.py --check` ONLY after one of those errors (or another encoder/Pillow error), or on the Customize path to read `vector_pdf` before answering a PDF question |
-| One command | `mkdir -p <scratch> && python …` in ONE shell call. No extra verification calls — the JSON is the check |
+| No separate check | The generation run reports `encoder` and returns `missing_encoder` / `missing_pillow` itself. Run `python '<skill-dir>/scripts/make_qr.py' --check` ONLY after one of those errors (or another encoder/Pillow error), or on the Customize path to read `vector_pdf` before answering a PDF question |
+| One command | `mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' …` in ONE call. No extra verification calls — the JSON is the check |
+| **Safe commands (security)** | Never put a user-derived value — URL, caption, frame text, color, logo path, output name, Wi-Fi / contact / event fields, CSV column names — raw or inside double quotes into a shell string: `$(…)`, backticks and `$VAR` still run inside `"…"`. **Prefer an argument list** when the host runs Python: `subprocess.run([sys.executable, script, "--url", url, …])`, one list item per value, never `shell=True`. **In a shell**, wrap every user value in single quotes and write each `'` inside it as `'\''` (e.g. `Bob's` → `'Bob'\''s'`). Quote `<skill-dir>`, `<scratch>` and file paths the same way. Fixed option names (`png`, `fluid`, `small`, `logo`) are safe as-is |
 | Scratch first | Write into `<scratch>` (Platform notes), one folder per code with only deliverables — never straight into the delivery location |
 | Images | Standard: never view the PNG. Customize: view the final PNG ONCE, only if the look changed (shape, eyes, frame, logo, colors, caption); after a rerun view only the rerun. The style guide is for the user — don't inspect it |
 
@@ -43,8 +44,8 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 | Questions | `core-AskUserQuestion` — one card per step; multi-select for Step 3b | ONE chat message per question, numbered options, recommended first; wait for the reply |
 | Finding uploads (logo, CSV) | `Glob input/**/*` and `Glob grounding/**/*` | Files attached in this conversation / the host's upload folder |
 | Scratch folder | `working/qr/<name>/` | A temp folder such as `qr_out/<name>/` |
-| Showing the style guide | `mkdir -p working/qr/guide && cp <skill-dir>/assets/qr-style-guide.png working/qr/guide/`, then ONE `host-CopyArtifact(surface="output", source="working/qr/guide/qr-style-guide.png", destination="qr-style-guide.png", overwrite=true)` | Show it inline, or attach it |
-| Delivering files | ONE `host-CopyArtifact(surface="output", source="working/qr/<name>/<file>", destination="<file>")`, or for several files `source="working/qr/<name>", destination="<name>", recursive=true`. Retry the same call on "source not visible yet"; confirm with ONE `Glob output/**/*` | Return each file as an attachment. Only ONE file per response and several made → zip them (e.g. `qr_out/<name>-qr.zip`) in the generating command |
+| Showing the style guide | `mkdir -p working/qr/guide && cp '<skill-dir>/assets/qr-style-guide.png' working/qr/guide/`, then ONE `host-CopyArtifact(surface="output", source="working/qr/guide/qr-style-guide.png", destination="qr-style-guide.png", overwrite=true)` | Show it inline, or attach it |
+| Delivering files | ONE `host-CopyArtifact(surface="output", source="working/qr/<name>/<file>", destination="<file>")`, or for several files `source="working/qr/<name>", destination="<name>", recursive=true`. Retry the same call on "source not visible yet"; confirm with ONE `Glob output/**/*` | Return each file as an attachment. Only ONE file per response and several made → zip them (e.g. `qr_out/<name>-qr.zip`, paths single-quoted) in the generating command |
 | Seeing images | The image viewer shows the agent only; the user sees delivered files | The delivered attachment is the preview |
 | Typical libraries | ReportLab: vector PDF, no scan verifier | Varies; PDF may be 300-dpi raster; may have a scan verifier |
 
@@ -87,9 +88,9 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Eye frame (B) | 1 Square (recommended), 2 Rounded, 3 Extra rounded, 4 Circle, 5 Leaf | `--eye-frame square\|rounded\|extra-rounded\|circle\|leaf` |
 | Eye center (C) | 1 Square (recommended), 2 Rounded, 3 Circle, 4 Diamond, 5 Leaf | `--eye-center square\|rounded\|circle\|diamond\|leaf` |
 | Brand colors | Black on white (recommended) / Match my logo's color (only when a logo is chosen) / Enter a hex (e.g. `#5C3A21`). Optional separate eye color. Always a dark code on a light background | `--fg HEX\|logo --bg HEX` · `--eye-color HEX\|logo` · `--bg transparent` (PNG/WEBP/SVG only) |
-| Logo | "Use [filename]" per uploaded image / "I'll attach one" (nothing arrives or skipped → no logo). Size: Medium (recommended) / Small (subtle) / Large. Say it switches on error correction H automatically. PNG/JPG best | `--logo PATH --logo-size small\|medium\|large` (0.15 / 0.22 / 0.28 of width; overrides `--logo-scale`) |
-| Caption | Free text under the code, e.g. "Visit Contoso" (plain Latin text is safest) | `--caption "..."` |
-| Outer frame (D) | None (recommended) / Box / Rounded box / Banner. Banner text: "SCAN ME" (default) / caption text / other. Optional frame color (default = code color) | `--frame none\|box\|rounded-box\|banner` · `--frame-text "..."` · `--frame-color HEX\|logo` |
+| Logo | "Use [filename]" per uploaded image / "I'll attach one" (nothing arrives or skipped → no logo). Size: Medium (recommended) / Small (subtle) / Large. Say it switches on error correction H automatically. PNG/JPG best | `--logo 'PATH' --logo-size small\|medium\|large` (0.15 / 0.22 / 0.28 of width; overrides `--logo-scale`) |
+| Caption | Free text under the code, e.g. "Visit Contoso" (plain Latin text is safest) | `--caption '...'` (single-quoted — see Safe commands) |
+| Outer frame (D) | None (recommended) / Box / Rounded box / Banner. Banner text: "SCAN ME" (default) / caption text / other. Optional frame color (default = code color) | `--frame none\|box\|rounded-box\|banner` · `--frame-text '...'` · `--frame-color HEX\|logo` |
 | Format & size | PNG (recommended) / SVG / PDF / JPG / WEBP, several allowed; SVG/PDF stay plain square. Size 1000 px (recommended) or custom (exact; frame/caption add space). PDF 216 pt (3 in) | `--format png,svg,pdf` · `--size 1000` · `--pdf-size 216` |
 
 `logo` as a color value needs `--logo` (else error `no_logo`).
@@ -109,17 +110,25 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Bulk | Uploaded CSV/XLSX; which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --outdir DIR` |
 
 Bulk: find the upload (ask if none); convert XLSX to CSV (openpyxl/pandas) into `<scratch>`; show the headers,
-ask for the two columns. Bare domains get `https://`; a bad row doesn't stop the batch.
+ask for the two columns. Bare domains get `https://`; a bad or empty row doesn't stop the batch and is reported
+(never skipped). Every file name ends with its row number (e.g. `Alpha_001.png`), so names never collide.
 
 ### Step 4 — Generate, read JSON, deliver
-1. **Run** in ONE command. `--out` is a base path without extension (dots like `contoso.com-qr` are kept);
-   quote every user value:
+1. **Run** in ONE command. `--out` is a base path without extension (dots like `contoso.com-qr` are kept).
+   Pass every user value safely (Engine rules → Safe commands): single quotes in a shell, `'` → `'\''`:
    ```bash
-   mkdir -p <scratch> && python <skill-dir>/scripts/make_qr.py --type url --url "contoso.com" \
-     --format png --out <scratch>/contoso.com-qr
-   mkdir -p <scratch> && python <skill-dir>/scripts/make_qr.py --url "contoso.com" --style fluid \
-     --eye-frame leaf --eye-center leaf --frame banner --frame-text "SCAN ME" --logo "<logo>.png" \
-     --logo-size small --fg logo --caption "Visit Contoso" --format png,svg,pdf --out <scratch>/contoso.com-qr
+   mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' --type url --url 'contoso.com' \
+     --format png --out '<scratch>/contoso.com-qr'
+   mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' --url 'contoso.com' --style fluid \
+     --eye-frame leaf --eye-center leaf --frame banner --frame-text 'SCAN ME' --logo '<logo>.png' \
+     --logo-size small --fg logo --caption 'Visit Contoso'\''s open house' --format png,svg,pdf \
+     --out '<scratch>/contoso.com-qr'
+   ```
+   Where the host runs Python directly, use an argument list instead (no shell, no quoting needed):
+   ```python
+   import subprocess, sys
+   r = subprocess.run([sys.executable, "<skill-dir>/scripts/make_qr.py", "--url", url, "--caption", caption,
+                       "--format", "png", "--out", out_base], capture_output=True, text=True)
    ```
 2. **Read the JSON** printed on stdout:
 
@@ -130,7 +139,7 @@ ask for the two columns. Bare domains get `https://`; a bad row doesn't stop the
    | `warnings` | Explain each in plain words (list below) |
    | `readback_check` | `modules_obscured_pct` vs `error_correction_budget_pct` → `verdict` good / risky / likely to fail (corner eyes excluded). Risky or worse → offer `--logo-size small` and/or `--style square`, rerun |
    | `scan_verified` | `null` = no QR reader installed (estimate only). Else `{engine, decoded, matches_content}`; `false` = failure → offer square / smaller logo / more contrast, rerun |
-   | Batch | `{"count", "failed", "results"}`; failed rows carry `row`, `name`, `error`, `message` → report, offer to fix those rows |
+   | Batch | `{"rows", "count", "failed", "results"}` (`rows` = every data row; `count` + `failed` = `rows`); failed rows carry `row`, `name`, `error`, `message` (`missing_data` = empty cell) → report, offer to fix those rows |
 
 3. **Errors** (exit code 2, `{"error": code, "message": "..."}`): relay the message in plain words, re-ask ONLY
    that item, rerun.
@@ -138,8 +147,10 @@ ask for the two columns. Bare domains get `https://`; a bad row doesn't stop the
    | Code | Action |
    |---|---|
    | `invalid_url` / `missing_url` | Re-ask the web address |
+| `missing_field` / `invalid_field` | Re-ask ONLY the field the message names (e.g. Wi-Fi password unless the network is open; event times like `20261015T190000`; latitude/longitude numbers) |
+| `bad_column` / `batch_not_found` | Show the spreadsheet's columns (listed in the message) and re-ask / ask for the file again |
    | `bad_color` | Re-ask that color (offer black or a hex) |
-   | `logo_not_found` / `logo_unreadable` | Re-ask the logo, or continue without one |
+   | `logo_not_found` / `logo_unreadable` | Re-ask the logo, or continue without one (a fully transparent logo can't supply a color — offer a hex) |
    | `logo_svg` | Ask for a PNG or JPG logo |
    | `bad_format` | Re-ask the format (png, svg, pdf, jpg, webp) |
    | `no_logo` | Use black, say so |
@@ -147,8 +158,8 @@ ask for the two columns. Bare domains get `https://`; a bad row doesn't stop the
    | `missing_encoder` / `missing_pillow` | "This environment can't make QR codes (a required image or QR library is missing)." Stop; ask nothing more (optionally one `--check` to confirm) |
 
    **Warnings to explain:** low contrast (code, eyes, frame); inverted light-on-dark; margin under 4 squares;
-   squares under 4 px (bigger size); emoji/CJK text may show as boxes; error correction raised for the logo;
-   "fg taken from logo: #…" (name it); SVG/PDF plain square; PDF is a 300-dpi image (fine for print); failed
+   squares under 4 px (bigger size); emoji/CJK text may show as boxes; caption shown smaller on several lines / banner text too long (offer to shorten); error correction raised for the logo;
+   "fg taken from logo: #…" (name it); "The SVG/PDF leaves out: …" (name each listed option; offer PNG for the styled version); PDF is a 300-dpi image (fine for print); failed
    scan test. Tiny caption text in the preview = no TrueType font here; say so.
 4. **Preview (Customize only):** follow the Images rule. If only SVG/PDF was chosen, add a PNG preview run in
    the SAME command to a base outside `<scratch>` (e.g. `<scratch>/../preview/<name>`) and view that.
@@ -171,5 +182,7 @@ ask for the two columns. Bare domains get `https://`; a bad row doesn't stop the
 - The payload already masks Wi-Fi passwords; never echo the `--password` value in chat, and never put
   passwords or other secrets in captions, frame text or file names.
 - Never silently overwrite a user's file in the delivery location.
+- Never interpolate user values raw or in double quotes into a shell command — use an argument list, or single
+  quotes with `'` written as `'\''` (Engine rules → Safe commands). This applies to every value and every command.
 - Never `pip install`. On a script error, relay the message in plain words — no tracebacks, and never
   hand-draw a QR code.

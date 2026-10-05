@@ -55,44 +55,104 @@ VECTOR = {"svg", "pdf"}
 def _esc(s):  # escaping for WIFI / MECARD style fields
     return "".join("\\" + c if c in '\\;,:"' else c for c in (s or ""))
 
+def _vtext(s):
+    """vCard 3.0 / iCalendar TEXT escaping: backslash, semicolon, comma, and newlines -> \\n."""
+    s = (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+    return s.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
+
+def _oneline(s):
+    """Non-TEXT single-line values (phone, email, URL). Line breaks are rejected in validate_fields(),
+    so they can never start a new vCard field; this only trims surrounding spaces."""
+    return (s or "").strip()
+
+TYPE_LABELS = {"text": "plain-text", "wifi": "Wi-Fi", "vcard": "contact card", "email": "email",
+               "phone": "phone-call", "sms": "text-message", "geo": "map-location", "event": "calendar-event"}
+
+FIELD_LABELS = {"text": "the text", "ssid": "the Wi-Fi network name", "password": "the Wi-Fi password",
+                "name": "the contact's name", "email": "the email address", "phone": "the phone number",
+                "lat": "the latitude", "lon": "the longitude", "summary": "the event title",
+                "start": "the event start time", "end": "the event end time"}
+
+REQUIRED_FIELDS = {"text": ["text"], "wifi": ["ssid"], "vcard": ["name"], "email": ["email"],
+                   "phone": ["phone"], "sms": ["phone"], "geo": ["lat", "lon"],
+                   "event": ["summary", "start", "end"]}
+
+def _wifi_auth(a):
+    auth = (a.auth or "WPA").strip().upper()
+    return "nopass" if auth in ("NONE", "OPEN", "NOPASS") else auth
+
+def validate_fields(a):
+    """Raise QRError before building a payload if a required field for this code type is missing or malformed."""
+    t = a.type
+    need = list(REQUIRED_FIELDS.get(t, []))
+    if t == "wifi" and _wifi_auth(a) != "nopass":
+        need.append("password")
+    missing = [f for f in need if not str(getattr(a, f, None) or "").strip()]
+    if missing:
+        names = " and ".join(FIELD_LABELS.get(f, f) for f in missing)
+        flags = ", ".join("--" + f for f in missing)
+        raise QRError("missing_field", f"For this {TYPE_LABELS.get(t, t)} QR code I need {names} ({flags}).")
+    for f in ("phone", "email", "url"):
+        v = getattr(a, f, None) or ""
+        if t in ("vcard", "email", "phone", "sms") and re.search(r"[\r\n]", v):
+            raise QRError("invalid_field", f"The {f} can't contain line breaks.")
+    if t == "vcard" and a.email and (re.search(r"\s", a.email.strip()) or "@" not in a.email):
+        raise QRError("invalid_field", f"\"{a.email.strip()}\" doesn't look like an email address.")
+    if t == "email" and (re.search(r"\s", a.email.strip()) or "@" not in a.email):
+        raise QRError("invalid_field", f"\"{a.email}\" doesn't look like an email address.")
+    if t == "geo":
+        try:
+            lat, lon = float(a.lat), float(a.lon)
+        except ValueError:
+            raise QRError("invalid_field", "Latitude and longitude must be numbers, e.g. 38.9072 and -77.0369.")
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise QRError("invalid_field", "Latitude must be between -90 and 90, and longitude between -180 and 180.")
+    if t == "event":
+        for f in ("start", "end"):
+            v = getattr(a, f).strip().replace("-", "").replace(":", "")
+            if not re.fullmatch(r"\d{8}(T\d{6}Z?)?", v):
+                raise QRError("invalid_field", f"The event {f} time \"{getattr(a, f)}\" should look like 20261015T190000 (or 2026-10-15T19:00:00).")
+
 def build_payload(a):
     t = a.type
+    validate_fields(a)
     if t == "url":
         return normalize_url(a.url)
     if t == "text":
         return a.text
     if t == "wifi":
-        auth = (a.auth or "WPA").upper()
-        if auth in ("NONE", "OPEN", "NOPASS"):
+        auth = _wifi_auth(a)
+        if auth == "nopass":
             return f"WIFI:T:nopass;S:{_esc(a.ssid)};{'H:true;' if a.hidden else ''};"
         return f"WIFI:T:{auth};S:{_esc(a.ssid)};P:{_esc(a.password)};{'H:true;' if a.hidden else ''};"
     if t == "vcard":
-        parts = (a.name or "").split(" ", 1)
+        full = a.name.strip()
+        parts = full.split(" ", 1)
         first, last = parts[0], (parts[1] if len(parts) > 1 else "")
-        lines = ["BEGIN:VCARD", "VERSION:3.0", f"N:{last};{first};;;", f"FN:{a.name}"]
-        if a.org: lines.append(f"ORG:{a.org}")
-        if a.title: lines.append(f"TITLE:{a.title}")
-        if a.phone: lines.append(f"TEL;TYPE=CELL:{a.phone}")
-        if a.email: lines.append(f"EMAIL:{a.email}")
-        if a.url: lines.append(f"URL:{a.url}")
-        if a.address: lines.append(f"ADR:;;{a.address};;;;")
+        lines = ["BEGIN:VCARD", "VERSION:3.0", f"N:{_vtext(last)};{_vtext(first)};;;", f"FN:{_vtext(full)}"]
+        if a.org: lines.append(f"ORG:{_vtext(a.org)}")
+        if a.title: lines.append(f"TITLE:{_vtext(a.title)}")
+        if a.phone: lines.append(f"TEL;TYPE=CELL:{_oneline(a.phone)}")
+        if a.email: lines.append(f"EMAIL:{_oneline(a.email)}")
+        if a.url: lines.append(f"URL:{_oneline(a.url)}")
+        if a.address: lines.append(f"ADR:;;{_vtext(a.address)};;;;")
         lines.append("END:VCARD")
         return "\n".join(lines)
     if t == "email":
         q = []
         if a.subject: q.append("subject=" + quote(a.subject))
         if a.body: q.append("body=" + quote(a.body))
-        return f"mailto:{a.email}" + ("?" + "&".join(q) if q else "")
+        return f"mailto:{a.email.strip()}" + ("?" + "&".join(q) if q else "")
     if t == "phone":
-        return f"tel:{a.phone}"
+        return f"tel:{_oneline(a.phone)}"
     if t == "sms":
-        return f"SMSTO:{a.phone}:{a.body or ''}"
+        return f"SMSTO:{_oneline(a.phone)}:{a.body or ''}"
     if t == "geo":
-        return f"geo:{a.lat},{a.lon}"
+        return f"geo:{float(a.lat)},{float(a.lon)}"
     if t == "event":
-        def dt(s): return s.replace("-", "").replace(":", "")
-        lines = ["BEGIN:VEVENT", f"SUMMARY:{a.summary}", f"DTSTART:{dt(a.start)}", f"DTEND:{dt(a.end)}"]
-        if a.location: lines.append(f"LOCATION:{a.location}")
+        def dt(s): return s.strip().replace("-", "").replace(":", "")
+        lines = ["BEGIN:VEVENT", f"SUMMARY:{_vtext(a.summary.strip())}", f"DTSTART:{dt(a.start)}", f"DTEND:{dt(a.end)}"]
+        if a.location: lines.append(f"LOCATION:{_vtext(a.location)}")
         lines.append("END:VEVENT")
         return "\n".join(lines)
     raise SystemExit(f"Unknown type {t}")
@@ -243,8 +303,27 @@ def _font(sz):
     except TypeError:
         return ImageFont.load_default()
 
-def decorate(code, fg, bg, frame, frame_text, caption, frame_color=None):
-    """Optional outer frame around the code, plus optional caption."""
+def _wrap(text, fits):
+    """Greedy word wrap; words longer than a whole line are broken by characters."""
+    lines, cur = [], ""
+    for word in text.split():
+        cand = f"{cur} {word}".strip()
+        if fits(cand):
+            cur = cand; continue
+        if cur:
+            lines.append(cur); cur = ""
+        while not fits(word) and len(word) > 1:
+            k = len(word)
+            while k > 1 and not fits(word[:k]): k -= 1
+            lines.append(word[:k]); word = word[k:]
+        cur = word
+    if cur: lines.append(cur)
+    return lines or [text]
+
+def decorate(code, fg, bg, frame, frame_text, caption, frame_color=None, notes=None):
+    """Optional outer frame around the code, plus optional caption (shrunk, then wrapped, to fit - never clipped).
+    `notes` (a list) collects user-facing warnings."""
+    notes = notes if notes is not None else []
     W = code.width; fgc = _rgba(fg); bgc = _rgba(bg); fc = _rgba(frame_color or fg)
     solid_bg = bgc if bgc[3] else (255, 255, 255, 255)
     img = code
@@ -264,14 +343,28 @@ def decorate(code, fg, bg, frame, frame_text, caption, frame_color=None):
             while d.textlength(txt, font=f) > out.width * 0.85 and fs > 10:
                 fs -= 2; f = _font(fs)
             tw = d.textlength(txt, font=f)
+            if tw > out.width * 0.95:
+                notes.append("The banner text is too long to fit the banner and is cut off at the edges - shorten it (e.g. \"SCAN ME\").")
             d.text(((out.width - tw) / 2, W + 2 * pad + t + (banner_h - fs) / 2 - fs * 0.1), txt, fill=solid_bg, font=f)
         img = out
     if caption:
-        f = _font(max(12, W // 18)); cap_h = int(f.size * 1.8)
+        probe = ImageDraw.Draw(img); max_w = img.width * 0.92
+        cap_size = max(12, W // 18); min_size = max(12, W // 36); f = _font(cap_size)
+        while probe.textlength(caption, font=f) > max_w and cap_size > min_size:
+            cap_size = max(min_size, cap_size - 2); f = _font(cap_size)
+        lines = [caption]
+        if probe.textlength(caption, font=f) > max_w:
+            lines = _wrap(caption, lambda t: probe.textlength(t, font=f) <= max_w)
+        if len(lines) > 1:
+            notes.append(f"The caption is too long for one line, so it's shown smaller on {len(lines)} lines - consider shortening it.")
+        line_h = int(cap_size * 1.25)
+        cap_h = int(cap_size * 1.8) + line_h * (len(lines) - 1)
         canvas = Image.new("RGBA", (img.width, img.height + cap_h), bgc)
         canvas.alpha_composite(img, (0, 0))
-        dd = ImageDraw.Draw(canvas); w = dd.textlength(caption, font=f)
-        dd.text(((img.width - w) / 2, img.height + cap_h * 0.15), caption, fill=fgc, font=f)
+        dd = ImageDraw.Draw(canvas)
+        for k, line in enumerate(lines):
+            w = dd.textlength(line, font=f)
+            dd.text(((img.width - w) / 2, img.height + cap_h * 0.15 if len(lines) == 1 else img.height + cap_size * 0.27 + k * line_h), line, fill=fgc, font=f)
         img = canvas
     return img
 
@@ -287,6 +380,8 @@ def color_from_logo(path):
         for x in range(im.width):
             if alpha[x, y] < 128: continue
             i = qp[x, y]; counts[i] = counts.get(i, 0) + 1
+    if not counts:
+        raise QRError("logo_unreadable", f"The logo \"{os.path.basename(path)}\" has no visible pixels (it's fully transparent), so its color can't be matched. Pick a color instead, or use a different logo.")
     best = None
     for i, cnt in sorted(counts.items(), key=lambda kv: -kv[1]):
         r, g, b = pal[3 * i:3 * i + 3]
@@ -327,55 +422,75 @@ def save_raster(img, path, fmt, bg):
         img.save(path, "PNG")
 
 # ---------- vector (ReportLab PDF, hand-built SVG) ----------
+def _hex(color):
+    """Normalize any Pillow-accepted color (name, #abc, rgb(), hsl()) to #RRGGBB, so the colors that pass
+    check_color() are exactly the colors ReportLab and SVG render (ReportLab lacks some CSS names and
+    reads 3-digit hex differently)."""
+    r, g, b = ImageColor.getrgb(color)[:3]
+    return "#%02X%02X%02X" % (r, g, b)
+
+def _transparent(color):
+    return color in (None, "transparent", "none")
+
 def render_svg(m, border, fg, bg, logo, logo_scale, path, size):
     n = len(m); total = n + 2 * border
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total} {total}" width="{size}" height="{size}" shape-rendering="crispEdges">']
-    if bg not in (None, "transparent", "none"):
-        out.append(f'<rect width="{total}" height="{total}" fill="{bg}"/>')
+    if not _transparent(bg):
+        out.append(f'<rect width="{total}" height="{total}" fill="{_hex(bg)}"/>')
     d = "".join(f"M{c+border},{r+border}h1v1h-1z" for r in range(n) for c in range(n) if m[r][c])
-    out.append(f'<path d="{d}" fill="{fg}"/>')
+    out.append(f'<path d="{d}" fill="{_hex(fg)}"/>')
     if logo:
         buf = io.BytesIO(); lg = Image.open(logo).convert("RGBA"); lg.save(buf, "PNG")
-        lw = n * logo_scale; ratio = lg.height / lg.width
-        w, h = lw, lw * ratio; x, y = total / 2 - w / 2, total / 2 - h / 2
-        plate = "white" if bg in (None, "transparent", "none") else bg
+        k = (n * logo_scale) / max(lg.width, lg.height)  # longest side = logo_scale of the code (matches raster)
+        w, h = lg.width * k, lg.height * k; x, y = total / 2 - w / 2, total / 2 - h / 2
+        plate = "#FFFFFF" if _transparent(bg) else _hex(bg)
         out.append(f'<rect x="{x-0.6:.3f}" y="{y-0.6:.3f}" width="{w+1.2:.3f}" height="{h+1.2:.3f}" rx="0.6" fill="{plate}"/>')
         out.append(f'<image x="{x:.3f}" y="{y:.3f}" width="{w:.3f}" height="{h:.3f}" href="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>')
     out.append("</svg>")
     open(path, "w").write("".join(out))
 
-def render_pdf(m, border, fg, bg, logo, logo_scale, path, size_pts, caption):
+def render_pdf(m, border, fg, bg, logo, logo_scale, path, size_pts, caption, notes=None):
     from reportlab.pdfgen import canvas
     from reportlab.lib.colors import HexColor, white
     from reportlab.lib.utils import ImageReader
+    from reportlab.pdfbase.pdfmetrics import stringWidth
     n = len(m); total = n + 2 * border; u = size_pts / total
-    cap_h = 28 if caption else 0
+    cap_lines, cap_fs = [], 14.0
+    if caption:
+        max_w = size_pts * 0.92
+        while stringWidth(caption, "Helvetica-Bold", cap_fs) > max_w and cap_fs > 8:
+            cap_fs -= 0.5
+        cap_lines = [caption] if stringWidth(caption, "Helvetica-Bold", cap_fs) <= max_w else \
+            _wrap(caption, lambda t: stringWidth(t, "Helvetica-Bold", cap_fs) <= max_w)
+    cap_h = 0 if not caption else (28 if len(cap_lines) == 1 and cap_fs == 14.0 else cap_fs * 1.25 * len(cap_lines) + 12)
     c = canvas.Canvas(path, pagesize=(size_pts, size_pts + cap_h))
-    if bg not in (None, "transparent", "none"):
-        c.setFillColor(HexColor(bg) if bg.startswith("#") else bg); c.rect(0, 0, size_pts, size_pts + cap_h, stroke=0, fill=1)
-    c.setFillColor(HexColor(fg) if fg.startswith("#") else fg)
+    if not _transparent(bg):
+        c.setFillColor(HexColor(_hex(bg))); c.rect(0, 0, size_pts, size_pts + cap_h, stroke=0, fill=1)
+    c.setFillColor(HexColor(_hex(fg)))
     for r in range(n):
         for col in range(n):
             if m[r][col]:
                 c.rect((col + border) * u, cap_h + (total - border - r - 1) * u, u, u, stroke=0, fill=1)
     if logo:
-        lg = Image.open(logo).convert("RGBA"); ratio = lg.height / lg.width
-        w = n * u * logo_scale; h = w * ratio
+        lg = Image.open(logo).convert("RGBA")
+        k = (n * u * logo_scale) / max(lg.width, lg.height)  # longest side = logo_scale of the code (matches raster)
+        w, h = lg.width * k, lg.height * k
         x, y = size_pts / 2 - w / 2, cap_h + size_pts / 2 - h / 2
-        c.setFillColor(white if bg in (None, "transparent", "none") else HexColor(bg))
+        c.setFillColor(white if _transparent(bg) else HexColor(_hex(bg)))
         c.roundRect(x - u, y - u, w + 2 * u, h + 2 * u, u, stroke=0, fill=1)
         c.drawImage(ImageReader(lg), x, y, w, h, mask="auto")
     if caption:
-        c.setFillColor(HexColor(fg) if fg.startswith("#") else fg); c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(size_pts / 2, 10, caption)
+        c.setFillColor(HexColor(_hex(fg))); c.setFont("Helvetica-Bold", cap_fs)
+        for k, line in enumerate(cap_lines):  # first line on top
+            c.drawCentredString(size_pts / 2, 10 + (len(cap_lines) - 1 - k) * cap_fs * 1.25, line)
     c.save()
 
-def render_pdf_pillow(m, border, fg, bg, logo, logo_scale, path, size_pts, caption):
+def render_pdf_pillow(m, border, fg, bg, logo, logo_scale, path, size_pts, caption, notes=None):
     """PDF without ReportLab: a 300-dpi raster of the plain square code placed on a PDF page."""
     px = int(size_pts / 72 * 300)
     code = render_code(m, px, border, fg, bg if bg not in ("transparent", "none") else "#FFFFFF",
                        "square", "square", "square", None, logo, logo_scale)
-    img = decorate(code, fg, bg if bg not in ("transparent", "none") else "#FFFFFF", "none", None, caption)
+    img = decorate(code, fg, bg if bg not in ("transparent", "none") else "#FFFFFF", "none", None, caption, None, notes)
     img.convert("RGB").save(path, "PDF", resolution=300.0)
 
 # ---------- verification (optional real decode) ----------
@@ -491,6 +606,17 @@ def mask_secrets(payload):
         return re.sub(r"(P:)((?:\\.|[^;])*)", lambda m_: m_.group(1) + ("********" if m_.group(2) else ""), payload)
     return payload
 
+def vector_unsupported(a, fmt):
+    """Requested styling options that this vector format does not render (PNG/JPG/WEBP render all of them)."""
+    dropped = []
+    if a.style != "square": dropped.append(f"body shape ({a.style})")
+    if a.eye_frame != "square": dropped.append(f"corner-eye frame ({a.eye_frame})")
+    if a.eye_center != "square": dropped.append(f"corner-eye center ({a.eye_center})")
+    if a.eye_color: dropped.append("corner-eye color")
+    if a.frame != "none": dropped.append(f"outer frame ({a.frame})")
+    if fmt == "svg" and a.caption: dropped.append("caption")
+    return dropped
+
 # ---------- driver ----------
 def contrast_warning(fg, bg, label="code"):
     def lum(col):
@@ -552,19 +678,21 @@ def make_one(data, a, out_base):
                 code_img = render_code(m, a.size, a.border, a.fg, a.bg, a.style, a.eye_frame, a.eye_center, a.eye_color, a.logo, a.logo_scale)
                 readback = readback_check(code_img, m, a.size, a.border, ec)
                 code_img = pad_to_size(code_img, a.size, a.bg)
-                raster_img = decorate(code_img, a.fg, a.bg, a.frame, a.frame_text, a.caption, a.frame_color)
+                raster_img = decorate(code_img, a.fg, a.bg, a.frame, a.frame_text, a.caption, a.frame_color, warnings)
             if f in ("jpg", "jpeg") and a.bg in ("transparent", "none"):
                 warnings.append("JPG cannot be transparent - used white background.")
             save_raster(raster_img, path, f, a.bg)
         elif f == "svg":
-            if (a.style, a.eye_frame, a.eye_center, a.frame) != ("square", "square", "square", "none"): warnings.append("SVG is always plain square with no frame - shapes, eye styles and frames apply to PNG/JPG/WEBP.")
+            dropped = vector_unsupported(a, "svg")
+            if dropped: warnings.append(f"The SVG leaves out: {', '.join(dropped)} - SVG is a plain square code; these apply to PNG/JPG/WEBP.")
             render_svg(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.size)
         elif f == "pdf":
-            if (a.style, a.eye_frame, a.eye_center, a.frame) != ("square", "square", "square", "none"): warnings.append("PDF is always plain square with no frame - shapes, eye styles and frames apply to PNG/JPG/WEBP.")
+            dropped = vector_unsupported(a, "pdf")
+            if dropped: warnings.append(f"The PDF leaves out: {', '.join(dropped)} - PDF is a plain square code (caption included); these apply to PNG/JPG/WEBP.")
             if HAS_REPORTLAB:
-                render_pdf(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption)
+                render_pdf(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
             else:
-                render_pdf_pillow(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption)
+                render_pdf_pillow(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
                 warnings.append("ReportLab isn't installed here, so the PDF holds a high-resolution (300 dpi) image of the code rather than vector shapes - still fine for printing.")
         files.append(path)
     rb = locals().get("readback")
@@ -618,12 +746,25 @@ def main():
 def run(a):
     if a.batch:
         results = []
+        if not os.path.isfile(a.batch):
+            raise QRError("batch_not_found", f"I couldn't find the spreadsheet file \"{a.batch}\".")
         with open(a.batch, newline="", encoding="utf-8-sig") as fh:
-            for i, row in enumerate(csv.DictReader(fh), 1):
+            reader = csv.DictReader(fh)
+            cols = reader.fieldnames or []
+            for col in [a.data_column] + ([a.name_column] if a.name_column else []):
+                if col not in cols:
+                    raise QRError("bad_column", f"The spreadsheet has no column named \"{col}\". Its columns are: {', '.join(cols) or '(none)'}.")
+            for i, row in enumerate(reader, 1):
                 data = (row.get(a.data_column) or "").strip()
-                if not data: continue
-                name = (row.get(a.name_column) if a.name_column else None) or f"qr_{i:03d}"
-                safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:60]
+                name = ((row.get(a.name_column) or "") if a.name_column else "").strip()
+                if not data:
+                    results.append({"row": i, "name": name, "error": "missing_data",
+                                    "message": f"Row {i} has nothing in the \"{a.data_column}\" column, so no QR code was made for it."})
+                    continue
+                # Row number keeps every file name unique (a/b and a?b no longer collide);
+                # names that sanitize to nothing fall back to qr_<row>.
+                safe = re.sub(r"_+", "_", "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)).strip("_-")[:60]
+                safe = f"{safe}_{i:03d}" if safe else f"qr_{i:03d}"
                 try:
                     if a.type == "url" and not data.lower().startswith(("http://", "https://", "mailto:", "tel:", "wifi:", "smsto:", "geo:", "begin:")):
                         data = normalize_url(data)
@@ -631,7 +772,7 @@ def run(a):
                 except QRError as e:
                     results.append({"row": i, "name": name, "error": e.code, "message": e.message})
         ok = sum(1 for r in results if "error" not in r)
-        print(json.dumps({"count": ok, "failed": len(results) - ok, "results": results}, indent=2))
+        print(json.dumps({"rows": len(results), "count": ok, "failed": len(results) - ok, "results": results}, indent=2))
     else:
         print(json.dumps(make_one(build_payload(a), a, a.out), indent=2))
 
