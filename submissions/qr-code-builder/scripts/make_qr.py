@@ -16,7 +16,9 @@ Examples:
   python make_qr.py --url contoso.com --logo logo.png --style rounded --fg "#0B3D91" --format png,svg,pdf --scratch qr/brand-run1 --file-name brand-qr
   python make_qr.py --batch people.csv --data-column url --name-column name --format png --scratch qr/batch-run1
 """
-import argparse, re, base64, csv, io, json, os, sys, tempfile
+import argparse, re, base64, csv, io, json, math, os, sys, tempfile
+import gzip
+from urllib.parse import unquote_to_bytes
 from datetime import datetime
 from urllib.parse import quote
 from urllib.parse import urlsplit
@@ -98,9 +100,22 @@ def parse_event_time(raw, label):
     except ValueError:
         raise QRError("invalid_field", f"The event {label} \"{raw}\" isn't a real date/time (check the month, day and hour - e.g. 20261015T190000 is 15 Oct 2026, 7:00 pm).")
 
+# Phones understand exactly three WIFI: security types: WPA (covers WPA/WPA2/WPA3-Personal), WEP and nopass.
+WIFI_AUTH_ALIASES = {
+    "WPA": "WPA", "WPA2": "WPA", "WPA3": "WPA", "WPA/WPA2": "WPA", "WPA2/WPA3": "WPA", "WPA-PSK": "WPA",
+    "WPA2-PSK": "WPA", "WPA3-PSK": "WPA", "WPA-PERSONAL": "WPA", "WPA2-PERSONAL": "WPA", "WPA3-PERSONAL": "WPA",
+    "SAE": "WPA", "WEP": "WEP", "NOPASS": "nopass", "NONE": "nopass", "OPEN": "nopass",
+}
+ENTERPRISE_AUTH = ("EAP", "ENTERPRISE", "802.1X", "8021X", "RADIUS", "PEAP", "TTLS", "LEAP")
+
 def _wifi_auth(a):
-    auth = (a.auth or "WPA").strip().upper()
-    return "nopass" if auth in ("NONE", "OPEN", "NOPASS") else auth
+    raw = (a.auth or "WPA").strip()
+    key = re.sub(r"\s+", "", raw).upper()
+    if key in WIFI_AUTH_ALIASES:
+        return WIFI_AUTH_ALIASES[key]
+    if any(tag in key for tag in ENTERPRISE_AUTH):
+        raise QRError("invalid_field", f"\"{raw}\" is an enterprise (work/school login) Wi-Fi type. Wi-Fi QR codes only support personal networks: WPA (WPA/WPA2/WPA3), WEP or open (no password).")
+    raise QRError("invalid_field", f"\"{raw}\" isn't a Wi-Fi security type QR codes support. Use WPA (for WPA, WPA2 or WPA3), WEP, or nopass for an open network.")
 
 def validate_fields(a):
     """Raise QRError before building a payload if a required field for this code type is missing or malformed."""
@@ -141,6 +156,7 @@ def validate_fields(a):
 
 def build_payload(a):
     t = a.type
+    a._payload_notes = []
     validate_fields(a)
     if t == "url":
         return normalize_url(a.url)
@@ -148,6 +164,12 @@ def build_payload(a):
         return a.text
     if t == "wifi":
         auth = _wifi_auth(a)
+        if auth == "nopass" and (a.password or "").strip():
+            a._payload_notes.append("This is an open network, so the password you gave was left out of the code.")
+        elif auth == "WPA" and not (8 <= len(a.password) <= 63 or re.fullmatch(r"[0-9A-Fa-f]{64}", a.password)):
+            a._payload_notes.append("WPA passwords are normally 8-63 characters - double-check it, or phones won't connect.")
+        elif auth == "WEP" and not (len(a.password) in (5, 13) or re.fullmatch(r"[0-9A-Fa-f]{10}|[0-9A-Fa-f]{26}", a.password)):
+            a._payload_notes.append("WEP passwords are normally 5 or 13 characters (or 10/26 hex digits) - double-check it, or phones won't connect.")
         if auth == "nopass":
             return f"WIFI:T:nopass;S:{_esc(a.ssid)};{'H:true;' if a.hidden else ''};"
         return f"WIFI:T:{auth};S:{_esc(a.ssid)};P:{_esc(a.password)};{'H:true;' if a.hidden else ''};"
@@ -611,11 +633,54 @@ def _fully_load(path):
     with Image.open(path) as im:
         im.load()
 
+MAX_SVG_BYTES = 2 * 1024 * 1024
+_SVG_REF = re.compile(r"""(?:\b(?:xlink:)?href|\bsrc)\s*=\s*(["'])(.*?)\1|url\(\s*(["']?)(.*?)\3\s*\)|@import\s+(["'])(.*?)\5""", re.I | re.S)
+
+_INLINE_RASTER = re.compile(r"data:image/(png|jpe?g|gif|webp)[;,]", re.I)  # inline bitmaps only - no nested SVG
+
+def _svg_ref_allowed(ref):
+    ref = ref.strip()
+    return ref == "" or ref.startswith("#") or bool(_INLINE_RASTER.match(ref))
+
+def read_safe_svg(path, name):
+    """Read an SVG logo and refuse anything that could make the renderer reach outside the file:
+    DOCTYPE/ENTITY declarations (XXE, entity bombs) and any href/src/url()/@import that isn't an internal
+    #fragment or an inline data: URI (http(s), file:, //host, relative paths...)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_SVG_BYTES + 1)
+        if raw[:2] == b"\x1f\x8b":  # .svgz (gzip)
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read(MAX_SVG_BYTES + 1)
+    except (OSError, EOFError):
+        raise QRError("logo_unreadable", f"The SVG logo \"{name}\" couldn't be read. Please attach the logo as a PNG or JPG instead.")
+    if len(raw) > MAX_SVG_BYTES:
+        raise QRError("logo_unreadable", f"The SVG logo \"{name}\" is too large (over 2 MB). Please attach the logo as a PNG or JPG instead.")
+    text = raw.decode("utf-8", errors="replace")
+    if re.search(r"<!\s*(DOCTYPE|ENTITY)", text, re.I):
+        raise QRError("logo_unreadable", f"The SVG logo \"{name}\" contains document-type declarations that aren't allowed. Please attach the logo as a PNG or JPG instead.")
+    for m_ in _SVG_REF.finditer(text):
+        ref = next(g for g in (m_.group(2), m_.group(4), m_.group(6)) if g is not None)
+        if not _svg_ref_allowed(ref):
+            raise QRError("logo_unreadable", f"The SVG logo \"{name}\" links to outside files or web addresses, which isn't allowed. Please attach the logo as a PNG or JPG instead.")
+    return raw
+
+def _svg_fetch_inline_only(url, *args, **kwargs):
+    """cairosvg url_fetcher: decode inline bitmap data: URIs locally; refuse everything else (network, files, nested SVG)."""
+    url = str(url).strip()
+    if not _INLINE_RASTER.match(url) or "," not in url:
+        raise ValueError("external resource blocked")
+    meta, payload = url.split(",", 1)  # decode the data: URI locally - no URL opener, no network, no files
+    if meta.lower().endswith(";base64"):
+        return base64.b64decode(unquote_to_bytes(payload), validate=False)
+    return unquote_to_bytes(payload)
+
 def check_logo(path):
     if not os.path.isfile(path):
         raise QRError("logo_not_found", f"I couldn't find the logo file \"{path}\".")
     name = os.path.basename(path)
     if path.lower().endswith((".svg", ".svgz")):
+        svg_bytes = read_safe_svg(path, name)  # refuses external references, DOCTYPE/entities and oversize files
         try:
             import cairosvg
         except (ImportError, OSError):  # OSError: cairosvg installed but the Cairo system library is missing
@@ -623,9 +688,13 @@ def check_logo(path):
         # Convert into a private temp folder - never next to the upload, which may be read-only or hold a same-named file.
         try:
             png = os.path.join(tempfile.mkdtemp(prefix="qr_logo_"), os.path.splitext(name)[0] + ".png")
-            cairosvg.svg2png(url=path, write_to=png, output_width=800)
+            # bytestring (no base URL) + unsafe=False + a fetcher that only decodes inline data: URIs, so nothing is
+            # ever loaded from the network or the local disk while rendering.
+            cairosvg.svg2png(bytestring=svg_bytes, write_to=png, output_width=800, unsafe=False, url_fetcher=_svg_fetch_inline_only)
             _fully_load(png)
-        except Exception:  # malformed/unsupported SVG, unwritable temp, or an unreadable result
+        except TypeError:  # an old cairosvg without url_fetcher: can't guarantee no external loading -> refuse
+            raise QRError("logo_svg", "SVG logos can't be converted safely here. Please attach the logo as a PNG (preferably with a transparent background) or JPG.")
+        except Exception:  # malformed/unsupported SVG, blocked resource, unwritable temp, or an unreadable result
             raise QRError("logo_unreadable", f"The SVG logo \"{name}\" couldn't be converted to an image. Please attach the logo as a PNG or JPG instead.")
         return png
     try:
@@ -757,6 +826,9 @@ def contrast_warning(fg, bg, label="code"):
     if ratio < 4: warn.append(f"Low contrast for the {label} ({ratio:.1f}:1) - aim for 4:1 or higher.")
     return warn
 
+MIN_MODULE_PX = 4     # smallest square (px) phones scan reliably on screen; also guarantees the image fits --size
+MIN_MODULE_PT = 1.0   # smallest printed square in a PDF (1 pt = 0.35 mm)
+
 LIMITS = {"size": (100, 5000, "px"), "pdf_size": (36, 2000, "pt"), "border": (0, 20, "squares"),
           "logo_scale": (0.05, 0.30, "of the code width")}
 
@@ -801,9 +873,13 @@ def make_one(data, a, scratch_real, file_name):
     bad = [f for f in fmts if f not in RASTER | VECTOR]
     if bad or not fmts:
         raise QRError("bad_format", f"Unsupported format(s): {', '.join(bad) or '(none)'}. Choose from png, jpg, webp, svg, pdf.")
-    module_px = a.size // (len(m) + 2 * a.border)
-    if any(f in RASTER for f in fmts) and module_px < 4:
-        warnings.append(f"Each square is only {module_px}px - the image is too small to scan reliably. Use --size 600 or more.")
+    total = len(m) + 2 * a.border
+    if any(f in RASTER or f == "svg" for f in fmts) and a.size // total < MIN_MODULE_PX:
+        need = MIN_MODULE_PX * total
+        raise QRError("size_too_small", f"--size {a.size} is too small for this much content: each square would be under {MIN_MODULE_PX} px and phones couldn't scan it. Use --size {need} or more (or shorten the content).")
+    if "pdf" in fmts and a.pdf_size / total < MIN_MODULE_PT:
+        need = math.ceil(MIN_MODULE_PT * total)
+        raise QRError("size_too_small", f"--pdf-size {a.pdf_size:g} pt is too small for this much content: each square would be under {MIN_MODULE_PT:g} pt (about 0.35 mm). Use --pdf-size {need} or more (or shorten the content).")
     files = []
     raster_img = None
     try:
@@ -907,6 +983,9 @@ def main():
         print(json.dumps({"error": "internal_error", "message": "Something unexpected went wrong while making the QR code. Try again with simpler options.",
                           "detail": f"{type(e).__name__}: {str(e)[:200]}"}, indent=2)); sys.exit(2)
 
+# In a web-link batch, cells that already start with one of these are other code types and are encoded as given.
+BATCH_RAW_SCHEMES = ("mailto:", "tel:", "wifi:", "smsto:", "geo:", "begin:")
+
 def read_csv_text(path):
     """Decode a CSV the way spreadsheets actually save it: UTF-8 (with or without BOM), else Windows-1252
     (Excel's classic "CSV (Comma delimited)"). Binary / non-text files raise bad_csv."""
@@ -955,9 +1034,10 @@ def run(a):
                 safe = re.sub(r"_+", "_", "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)).strip("_-")[:60]
                 safe = f"{safe}_{i:03d}" if safe else f"qr_{i:03d}"
                 try:
-                    if a.type == "url" and not data.lower().startswith(("http://", "https://", "mailto:", "tel:", "wifi:", "smsto:", "geo:", "begin:")):
-                        data = normalize_url(data)
-                    results.append(make_one(data, a, scratch_real, safe))
+                    if a.type == "url" and not data.lower().startswith(BATCH_RAW_SCHEMES):
+                        data = normalize_url(data)  # bare domains AND http(s) links: same checks as a single link
+                    res = make_one(data, a, scratch_real, safe)
+                    results.append({"row": i, "name": name, **res})
                 except QRError as e:
                     results.append({"row": i, "name": name, "error": e.code, "message": e.message})
         ok = sum(1 for r in results if "error" not in r)
@@ -973,6 +1053,7 @@ def run(a):
         file_name = safe_file_name(a.file_name)
         scratch_real = prepare_scratch(a.scratch)
         out = make_one(payload, a, scratch_real, file_name)
+        out["warnings"] = list(dict.fromkeys(a._payload_notes + out["warnings"]))
         out["file_name"] = file_name
         if file_name != safe_file_name_ext_only(a.file_name):
             out["warnings"].append(f"The file name was changed to \"{file_name}\" (only letters, numbers, '.', '-' and '_' are allowed; no folders).")

@@ -36,7 +36,7 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 | One command | `python '<skill-dir>/scripts/make_qr.py' … --scratch '<scratch>' --file-name '<slug>-qr'` in ONE call (the engine creates `<scratch>`; no `mkdir`). No extra verification calls — the JSON is the check |
 | **Safe commands (security)** | Never put a user-derived value — URL, caption, frame text, color, logo path, file name, Wi-Fi / contact / event fields, CSV column names — raw or inside double quotes into a shell string: `$(…)`, backticks and `$VAR` still run inside `"…"`. **Prefer an argument list** when the host runs Python: `subprocess.run([sys.executable, script, "--url", url, …])`, one list item per value, never `shell=True`. **In a shell**, wrap every user value in single quotes and write each `'` inside it as `'\''` (e.g. `Bob's` → `'Bob'\''s'`). Quote `<skill-dir>`, `<scratch>` and file paths the same way. Fixed option names (`png`, `fluid`, `small`, `logo`) are safe as-is |
 | Fresh folder every run | `<scratch>` = `<qr-root>/<slug>-run<N>` (Platform notes). Use a **NEW** folder for EVERY run and rerun — N = 1, 2, 3 …; never reuse one, never write straight into the delivery location. The engine creates it, refuses a non-empty one (`scratch_not_empty` → next N) and refuses anything outside the working folder (`bad_scratch`). **Never delete files or folders** to make room |
-| Safe file names | `--file-name '<slug>-qr'`, where `<slug>` is the web address's host (`contoso.com`) or the code type (`wifi`, `contact`, `event`, `text`). Never pass a path, folder or a file name the user typed. The engine reduces the name to letters, digits, `.`, `-`, `_` (it reports the final `file_name`), and checks every file stays inside `<scratch>` — quoting alone doesn't stop `../` tricks |
+| Safe file names | `--file-name '<slug>-qr'`, where `<slug>` is the web address's host (`contoso.com`), the code type (`wifi`, `contact`, `event`, `text`), or for bulk `links` (bulk file names come from the name column + row number). Never pass a path, folder or a file name the user typed. The engine reduces the name to letters, digits, `.`, `-`, `_` (it reports the final `file_name`), and checks every file stays inside `<scratch>` — quoting alone doesn't stop `../` tricks |
 | Images | Standard: never view the PNG. Customize: view the final PNG ONCE, only if the look changed (shape, eyes, frame, logo, colors, caption); after a rerun view only the rerun. The style guide is for the user — don't inspect it |
 
 ## Platform notes
@@ -89,10 +89,10 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Eye frame (B) | 1 Square (recommended), 2 Rounded, 3 Extra rounded, 4 Circle, 5 Leaf | `--eye-frame square\|rounded\|extra-rounded\|circle\|leaf` |
 | Eye center (C) | 1 Square (recommended), 2 Rounded, 3 Circle, 4 Diamond, 5 Leaf | `--eye-center square\|rounded\|circle\|diamond\|leaf` |
 | Brand colors | Black on white (recommended) / Match my logo's color (only when a logo is chosen) / Enter a hex (e.g. `#5C3A21`). Optional separate eye color. Always a dark code on a light background | `--fg HEX\|logo --bg HEX` · `--eye-color HEX\|logo` · `--bg transparent` (PNG/WEBP/SVG only) |
-| Logo | "Use [filename]" per uploaded image / "I'll attach one" (nothing arrives or skipped → no logo). Size: Medium (recommended) / Small (subtle) / Large. Say it switches on error correction H automatically. PNG/JPG best | `--logo 'PATH' --logo-size small\|medium\|large` (0.15 / 0.22 / 0.28 of width; overrides `--logo-scale`) |
+| Logo | "Use [filename]" per uploaded image / "I'll attach one" (nothing arrives or skipped → no logo). Size: Medium (recommended) / Small (subtle) / Large. Say it switches on error correction H automatically. PNG/JPG best; SVG logos only if self-contained (no links to web addresses or other files — those are refused) | `--logo 'PATH' --logo-size small\|medium\|large` (0.15 / 0.22 / 0.28 of width; overrides `--logo-scale`) |
 | Caption | Free text under the code, e.g. "Visit Contoso" (plain Latin text is safest) | `--caption '...'` (single-quoted — see Safe commands) |
 | Outer frame (D) | None (recommended) / Box / Rounded box / Banner. Banner text: "SCAN ME" (default) / caption text / other. Optional frame color (default = code color) | `--frame none\|box\|rounded-box\|banner` · `--frame-text '...'` · `--frame-color HEX\|logo` |
-| Format & size | PNG (recommended) / SVG / PDF / JPG / WEBP, several allowed; SVG/PDF stay plain square. Size 1000 px (recommended) or custom (exact; frame/caption add space). PDF 216 pt (3 in) | `--format png,svg,pdf` · `--size 1000` · `--pdf-size 216` |
+| Format & size | PNG (recommended) / SVG / PDF / JPG / WEBP, several allowed; SVG/PDF stay plain square. Size 1000 px (recommended) or custom (exact; frame/caption add space). PDF 216 pt (3 in). Too small for the content → `size_too_small` with the minimum | `--format png,svg,pdf` · `--size 1000` · `--pdf-size 216` |
 
 `logo` as a color value needs `--logo` (else error `no_logo`).
 
@@ -101,7 +101,7 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 |---|---|---|
 | Web link (default) | Web address | `--type url --url` |
 | Plain text | The text | `--type text --text` |
-| Wi-Fi | Network name, password, security (WPA default / WEP / none), hidden? | `--type wifi --ssid --password --auth WPA\|WEP\|nopass [--hidden]` |
+| Wi-Fi | Network name, password, security: WPA (recommended — covers WPA/WPA2/WPA3) / WEP / open (no password), hidden? Work/school (enterprise) Wi-Fi isn't supported | `--type wifi --ssid --password --auth WPA\|WEP\|nopass [--hidden]` (WPA2/WPA3 are accepted as WPA) |
 | Contact card | Name; optional org, title, phone, email, website, address | `--type vcard --name --org --title --phone --email --url --address` |
 | Email | Address; optional subject, body | `--type email --email --subject --body` |
 | Text message | Phone; optional message | `--type sms --phone --body` |
@@ -110,7 +110,8 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Calendar event | Title, start, end (`20261015T190000`, or `20261015` for all-day — then the end is the day AFTER the last day), optional location. End must be after start | `--type event --summary --start --end --location` |
 | Bulk | Uploaded CSV (or XLSX, converted first — below); which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --scratch DIR` |
 
-Bulk: find the upload (ask if none); show the headers, ask for the two columns. Bare domains get `https://`; a bad
+Bulk: find the upload (ask if none); show the headers, ask for the two columns. Bare domains get `https://`, and every web link (bare or `http(s)://`) gets the same
+checks as a single link; cells starting with `mailto:`, `tel:`, `smsto:`, `geo:`, `WIFI:` or `BEGIN:` are encoded as given; a bad
 or empty row doesn't stop the batch and is reported (never skipped). Every file name ends with its row number
 (e.g. `Alpha_001.png`), so names never collide. Non-UTF-8 CSVs (Excel's classic "CSV (Comma delimited)") are read
 as Windows text with a warning.
@@ -184,7 +185,7 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
    | Code | Action |
    |---|---|
    | `invalid_url` / `missing_url` | Re-ask the web address |
-   | `missing_field` / `invalid_field` | Re-ask ONLY the field the message names (e.g. Wi-Fi password unless the network is open; a real event date/time like `20261015T190000` with the end after the start; latitude/longitude numbers) |
+   | `missing_field` / `invalid_field` | Re-ask ONLY the field the message names (e.g. Wi-Fi password unless the network is open; a supported Wi-Fi security type; a real event date/time like `20261015T190000` with the end after the start; latitude/longitude numbers) |
    | `bad_column` / `batch_not_found` | Show the spreadsheet's columns (listed in the message) and re-ask / ask for the file again |
    | `not_csv` / `bad_csv` | Ask for a "CSV UTF-8 (Comma delimited)" export (for `.xlsx`, try the Bulk conversion first) |
    | `bad_color` | Re-ask that color (offer black or a hex) |
@@ -193,6 +194,7 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
    | `bad_format` | Re-ask the format (png, svg, pdf, jpg, webp) |
    | `no_logo` | Use black, say so |
    | `too_long` | Ask for a shorter link or less text |
+   | `size_too_small` | The chosen size can't fit this much content — rerun with the minimum size the message gives (or shorter content); say so |
    | `bad_option` | An option is out of range or invalid (the message names it) — fix that value; if it came from the user, re-ask it |
    | `cannot_write` | The scratch folder isn't writable — rerun ONCE with the next `-run<N>`; if it fails again, say so |
    | `scratch_not_empty` | The folder was already used — rerun with the next `-run<N>` (never empty or delete the old one) |
@@ -202,7 +204,7 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
    | `missing_encoder` / `missing_pillow` | "This environment can't make QR codes (a required image or QR library is missing)." Stop; ask nothing more (optionally one `--check` to confirm) |
 
    **Warnings to explain** (batch: a top-level `warnings` list may also note the CSV encoding): low contrast (code, eyes, frame); inverted light-on-dark; margin under 4 squares;
-   squares under 4 px (bigger size); emoji/CJK text may show as boxes; caption shown smaller on several lines / banner text too long (offer to shorten); error correction raised for the logo;
+   Wi-Fi password length looks wrong / password ignored for an open network; emoji/CJK text may show as boxes; caption shown smaller on several lines / banner text too long (offer to shorten); error correction raised for the logo;
    "fg taken from logo: #…" (name it); "The SVG/PDF leaves out: …" (name each listed option; offer PNG for the styled version); PDF is a 300-dpi image (fine for print); failed
    scan test. Tiny caption text in the preview = no TrueType font here; say so.
 4. **Preview (Customize only):** follow the Images rule. If only SVG/PDF was chosen, add a PNG preview run in
