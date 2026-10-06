@@ -6,11 +6,15 @@ PDF: ReportLab vector PDF, or a Pillow raster PDF when ReportLab is missing. SVG
 Optional: OpenCV / zxing-cpp / pyzbar - if present, the output is decoded to verify it really scans.
 Run `python make_qr.py --check` first to see what this environment supports.
 
+Output safety: every run writes ONLY into --scratch, which must be a new or empty folder inside the current
+working directory (no "..", no links out). --file-name is reduced to safe characters, and every file is checked
+to stay inside --scratch before it is written. Nothing outside --scratch is ever created, overwritten or deleted.
+
 Examples:
-  python make_qr.py --type url --url https://contoso.com --format png --out out/site.png
-  python make_qr.py --type wifi --ssid MyNet --password s3cret --auth WPA --format pdf --out out/wifi.pdf
-  python make_qr.py --type url --url https://contoso.com --logo logo.png --style rounded --fg "#0B3D91" --format png,svg,pdf --out out/brand
-  python make_qr.py --batch people.csv --data-column url --name-column name --format png --outdir out/batch
+  python make_qr.py --type url --url contoso.com --format png --scratch qr/contoso-run1 --file-name contoso.com-qr
+  python make_qr.py --type wifi --ssid MyNet --password s3cret --auth WPA --format pdf --scratch qr/wifi-run1 --file-name wifi-qr
+  python make_qr.py --url contoso.com --logo logo.png --style rounded --fg "#0B3D91" --format png,svg,pdf --scratch qr/brand-run1 --file-name brand-qr
+  python make_qr.py --batch people.csv --data-column url --name-column name --format png --scratch qr/batch-run1
 """
 import argparse, re, base64, csv, io, json, os, sys, tempfile
 from datetime import datetime
@@ -653,6 +657,81 @@ def mask_secrets(payload):
         return re.sub(r"(P:)((?:\\.|[^;])*)", lambda m_: m_.group(1) + ("********" if m_.group(2) else ""), payload)
     return payload
 
+# ---------- output-path safety ----------
+RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+def safe_file_name(raw, default="qr"):
+    """Reduce a requested file name to a safe base name: letters, digits, '.', '-', '_' only. Slashes, '..',
+    drive letters and other path syntax can't survive, so the name can never point outside --scratch."""
+    s = "".join(ch if (ch.isalnum() and ord(ch) < 0x2E80) or ch in ".-_" else "_" for ch in (raw or ""))
+    s = re.sub(r"\.{2,}", ".", s)
+    s = re.sub(r"_{2,}", "_", s).strip("._- ")
+    while True:  # drop a format extension the caller may have added (x.png -> x)
+        stem, ext = os.path.splitext(s)
+        if ext.lower().lstrip(".") in RASTER | VECTOR | {"jpeg"} and stem:
+            s = stem.rstrip("._- ")
+        else:
+            break
+    s = s[:80].rstrip("._- ")
+    if not s:
+        s = default
+    if s.split(".")[0].upper() in RESERVED_NAMES:
+        s = "qr_" + s
+    return s
+
+def safe_file_name_ext_only(raw):
+    """The requested name with only a trailing format extension removed (used to decide whether to warn)."""
+    s = (raw or "").strip()
+    while True:
+        stem, ext = os.path.splitext(s)
+        if ext.lower().lstrip(".") in RASTER | VECTOR | {"jpeg"} and stem:
+            s = stem
+        else:
+            return s
+
+def _inside(child, parent):
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:  # different drives (Windows)
+        return False
+
+def prepare_scratch(raw):
+    """Validate --scratch and return its resolved path. It must be a new or EMPTY folder inside the current
+    working directory, reached without '..' segments or links that lead elsewhere."""
+    if not raw or not str(raw).strip():
+        raise QRError("bad_scratch", "No scratch folder was given (--scratch).")
+    raw = str(raw).strip()
+    if any(seg == ".." for seg in re.split(r"[\\/]+", raw)):
+        raise QRError("bad_scratch", f"The scratch folder \"{raw}\" contains \"..\". Use a plain new folder such as qr/contoso-run1.")
+    base = os.path.realpath(os.getcwd())
+    real = os.path.realpath(raw)
+    if real == base or not _inside(real, base):
+        raise QRError("bad_scratch", f"The scratch folder \"{raw}\" must be a sub-folder of the working folder (e.g. qr/contoso-run1).")
+    if os.path.lexists(raw):
+        if os.path.islink(raw) or not os.path.isdir(raw):
+            raise QRError("bad_scratch", f"\"{raw}\" isn't a plain folder. Use a new folder name.")
+        if os.listdir(raw):
+            raise QRError("scratch_not_empty", f"The scratch folder \"{raw}\" already has files in it. Use a NEW folder for every run (e.g. ...-run2) so old QR files can't be delivered by mistake.")
+    else:
+        try:
+            os.makedirs(raw)
+        except OSError as e:
+            raise QRError("cannot_write", f"I couldn't create the scratch folder \"{raw}\" ({e.strerror or e}).")
+        if os.path.realpath(raw) != real or not _inside(os.path.realpath(raw), base):
+            raise QRError("bad_scratch", f"The scratch folder \"{raw}\" resolves outside the working folder.")
+    return real
+
+def safe_target(scratch_real, file_name):
+    """Absolute path for file_name inside scratch_real; refuse anything that would land elsewhere or overwrite."""
+    if os.path.basename(file_name) != file_name or file_name in ("", ".", ".."):
+        raise QRError("bad_scratch", f"Refusing unsafe file name \"{file_name}\".")
+    path = os.path.join(scratch_real, file_name)
+    if os.path.realpath(os.path.dirname(path)) != scratch_real or not _inside(os.path.realpath(path), scratch_real):
+        raise QRError("bad_scratch", f"Refusing to write \"{file_name}\" outside the scratch folder.")
+    if os.path.lexists(path):
+        raise QRError("scratch_not_empty", f"\"{file_name}\" already exists in the scratch folder - use a new folder for this run.")
+    return path
+
 def vector_unsupported(a, fmt):
     """Requested styling options that this vector format does not render (PNG/JPG/WEBP render all of them)."""
     dropped = []
@@ -691,7 +770,7 @@ def check_options(a):
         if not (lo <= v <= hi):
             raise QRError("bad_option", f"--{key.replace('_', '-')} {v:g} is out of range - use {lo:g} to {hi:g} {unit}.")
 
-def make_one(data, a, out_base):
+def make_one(data, a, scratch_real, file_name):
     ec = a.ec
     warnings = []
     for nm, val in (("the code", a.fg), ("the background", a.bg), ("the corner squares", a.eye_color), ("the frame", a.frame_color)):
@@ -725,18 +804,12 @@ def make_one(data, a, out_base):
     module_px = a.size // (len(m) + 2 * a.border)
     if any(f in RASTER for f in fmts) and module_px < 4:
         warnings.append(f"Each square is only {module_px}px - the image is too small to scan reliably. Use --size 600 or more.")
-    root, ext = os.path.splitext(out_base)
-    if ext.lower().lstrip(".") not in RASTER | VECTOR:
-        root = out_base  # keep dots that are part of the name (e.g. contoso.com-qr)
-    try:
-        os.makedirs(os.path.dirname(root) or ".", exist_ok=True)
-    except OSError as e:
-        raise QRError("cannot_write", f"I couldn't create the output folder \"{os.path.dirname(root)}\" ({e.strerror or e}).")
     files = []
     raster_img = None
     try:
         for f in fmts:
-            path = f"{root}.{f}"
+            path = safe_target(scratch_real, f"{file_name}.{f}")
+            files.append(path)  # recorded before writing so a partial file is cleaned up on failure
             if f in RASTER:
                 if raster_img is None:
                     code_img = render_code(m, a.size, a.border, a.fg, a.bg, a.style, a.eye_frame, a.eye_center, a.eye_color, a.logo, a.logo_scale)
@@ -758,9 +831,16 @@ def make_one(data, a, out_base):
                 else:
                     render_pdf_pillow(m, a.border, a.fg, a.bg, a.logo, a.logo_scale, path, a.pdf_size, a.caption, warnings)
                     warnings.append("ReportLab isn't installed here, so the PDF holds a high-resolution (300 dpi) image of the code rather than vector shapes - still fine for printing.")
-            files.append(path)
-    except OSError as e:
-        raise QRError("cannot_write", f"I couldn't save the QR code file ({e.strerror or e}). Check that the output folder exists and is writable.")
+    except BaseException as e:
+        for p in files:  # remove only files THIS run created inside scratch, so no half-finished set is left behind
+            try:
+                if os.path.lexists(p) and _inside(os.path.realpath(p), scratch_real):
+                    os.remove(p)
+            except OSError:
+                pass
+        if isinstance(e, OSError):
+            raise QRError("cannot_write", f"I couldn't save the QR code file ({e.strerror or e}). Check that the scratch folder is writable.")
+        raise
     rb = locals().get("readback")
     dc = None
     first_raster = next((p for p in files if p.rsplit(".", 1)[-1] in RASTER), None)
@@ -772,7 +852,14 @@ def make_one(data, a, out_base):
         warnings.append(f"Readback check {rb['verdict']}: {rb['modules_obscured_pct']}% of modules obscured vs {rb['error_correction_budget_pct']}% budget - shrink the logo or simplify styling.")
     return {"payload": mask_secrets(data), "version": version, "readback_check": rb, "scan_verified": dc,
             "modules": len(m), "error_correction": ec, "encoder": ENCODER,
-            "files": files, "warnings": list(dict.fromkeys(warnings))}
+            "files": files, "file_names": [os.path.basename(p) for p in files], "warnings": list(dict.fromkeys(warnings))}
+
+def folder_report(scratch_real, produced):
+    """Confirm the scratch folder holds exactly the files this run produced (nothing stale, nothing extra)."""
+    on_disk = sorted(os.listdir(scratch_real))
+    expected = sorted(os.path.basename(p) for p in produced)
+    extra = [f for f in on_disk if f not in expected]
+    return {"scratch": scratch_real, "folder_clean": not extra and on_disk == expected, "unexpected_files": extra}
 
 class _JsonArgParser(argparse.ArgumentParser):
     def error(self, message):  # bad/unknown option -> the documented JSON error, not usage text on stderr
@@ -788,7 +875,8 @@ def main():
         p.add_argument(f"--{k}")
     p.add_argument("--hidden", action="store_true")
     p.add_argument("--format", default="png", help="comma list: png,jpg,webp,svg,pdf")
-    p.add_argument("--out", default="qr")
+    p.add_argument("--scratch", help="NEW or empty folder (inside the working folder) to write into; one per run")
+    p.add_argument("--file-name", default="qr", help="base file name; reduced to safe characters, no paths")
     p.add_argument("--size", type=int, default=1000, help="raster pixel width / svg width")
     p.add_argument("--pdf-size", type=float, default=216, help="PDF code width in points (72 = 1 inch)")
     p.add_argument("--border", type=int, default=4)
@@ -805,7 +893,6 @@ def main():
     p.add_argument("--logo-size", choices=list(LOGO_SIZES), help="small=0.15 (subtle), medium=0.22, large=0.28; overrides --logo-scale")
     p.add_argument("--caption")
     p.add_argument("--batch"); p.add_argument("--data-column", default="data"); p.add_argument("--name-column")
-    p.add_argument("--outdir", default="qr_batch")
     a = p.parse_args()
     if a.check:
         print(json.dumps(environment_report(), indent=2)); return
@@ -855,10 +942,7 @@ def run(a):
             for col in [a.data_column] + ([a.name_column] if a.name_column else []):
                 if col not in cols:
                     raise QRError("bad_column", f"The spreadsheet has no column named \"{col}\". Its columns are: {', '.join(cols) or '(none)'}.")
-            try:
-                os.makedirs(a.outdir, exist_ok=True)
-            except OSError as e:
-                raise QRError("cannot_write", f"I couldn't create the output folder \"{a.outdir}\" ({e.strerror or e}).")
+            scratch_real = prepare_scratch(a.scratch)
             for i, row in enumerate(rows, 1):
                 data = (row.get(a.data_column) or "").strip()
                 name = ((row.get(a.name_column) or "") if a.name_column else "").strip()
@@ -873,15 +957,29 @@ def run(a):
                 try:
                     if a.type == "url" and not data.lower().startswith(("http://", "https://", "mailto:", "tel:", "wifi:", "smsto:", "geo:", "begin:")):
                         data = normalize_url(data)
-                    results.append(make_one(data, a, os.path.join(a.outdir, safe)))
+                    results.append(make_one(data, a, scratch_real, safe))
                 except QRError as e:
                     results.append({"row": i, "name": name, "error": e.code, "message": e.message})
         ok = sum(1 for r in results if "error" not in r)
         out = {"rows": len(results), "count": ok, "failed": len(results) - ok, "results": results}
-        if enc_note: out["warnings"] = [enc_note]
+        out.update(folder_report(scratch_real, [p for r in results for p in r.get("files", [])]))
+        notes = [enc_note] if enc_note else []
+        if not out["folder_clean"]:
+            notes.append("The scratch folder holds files this run didn't make - deliver only the listed files.")
+        if notes: out["warnings"] = notes
         print(json.dumps(out, indent=2))
     else:
-        print(json.dumps(make_one(build_payload(a), a, a.out), indent=2))
+        payload = build_payload(a)  # validate inputs before touching the file system
+        file_name = safe_file_name(a.file_name)
+        scratch_real = prepare_scratch(a.scratch)
+        out = make_one(payload, a, scratch_real, file_name)
+        out["file_name"] = file_name
+        if file_name != safe_file_name_ext_only(a.file_name):
+            out["warnings"].append(f"The file name was changed to \"{file_name}\" (only letters, numbers, '.', '-' and '_' are allowed; no folders).")
+        out.update(folder_report(scratch_real, out["files"]))
+        if not out["folder_clean"]:
+            out["warnings"].append("The scratch folder holds files this run didn't make - deliver only the listed files.")
+        print(json.dumps(out, indent=2))
 
 if __name__ == "__main__":
     main()

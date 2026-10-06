@@ -33,9 +33,10 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 | Skill folder | `<skill-dir>` = the folder this SKILL.md was loaded from. Engine: `scripts/make_qr.py`; style guide: `assets/qr-style-guide.png` (both relative to `<skill-dir>`). If unknown, search `**/qr-code-builder/scripts/make_qr.py` and use its grandparent. Use absolute paths in commands |
 | Libraries | Pillow + one QR encoder (ReportLab, `qrcode` or `segno`, first found). **Never** `pip install`; never write your own encoder. The engine reads **CSV only** for bulk (XLSX: see Bulk) |
 | No separate check | The generation run reports `encoder` and returns `missing_encoder` / `missing_pillow` itself. Run `python '<skill-dir>/scripts/make_qr.py' --check` ONLY after one of those errors (or another encoder/Pillow error), or on the Customize path to read `vector_pdf` before answering a PDF question |
-| One command | `mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' …` in ONE call. No extra verification calls — the JSON is the check |
-| **Safe commands (security)** | Never put a user-derived value — URL, caption, frame text, color, logo path, output name, Wi-Fi / contact / event fields, CSV column names — raw or inside double quotes into a shell string: `$(…)`, backticks and `$VAR` still run inside `"…"`. **Prefer an argument list** when the host runs Python: `subprocess.run([sys.executable, script, "--url", url, …])`, one list item per value, never `shell=True`. **In a shell**, wrap every user value in single quotes and write each `'` inside it as `'\''` (e.g. `Bob's` → `'Bob'\''s'`). Quote `<skill-dir>`, `<scratch>` and file paths the same way. Fixed option names (`png`, `fluid`, `small`, `logo`) are safe as-is |
-| Scratch first | Write into `<scratch>` (Platform notes), one folder per code with only deliverables — never straight into the delivery location |
+| One command | `python '<skill-dir>/scripts/make_qr.py' … --scratch '<scratch>' --file-name '<slug>-qr'` in ONE call (the engine creates `<scratch>`; no `mkdir`). No extra verification calls — the JSON is the check |
+| **Safe commands (security)** | Never put a user-derived value — URL, caption, frame text, color, logo path, file name, Wi-Fi / contact / event fields, CSV column names — raw or inside double quotes into a shell string: `$(…)`, backticks and `$VAR` still run inside `"…"`. **Prefer an argument list** when the host runs Python: `subprocess.run([sys.executable, script, "--url", url, …])`, one list item per value, never `shell=True`. **In a shell**, wrap every user value in single quotes and write each `'` inside it as `'\''` (e.g. `Bob's` → `'Bob'\''s'`). Quote `<skill-dir>`, `<scratch>` and file paths the same way. Fixed option names (`png`, `fluid`, `small`, `logo`) are safe as-is |
+| Fresh folder every run | `<scratch>` = `<qr-root>/<slug>-run<N>` (Platform notes). Use a **NEW** folder for EVERY run and rerun — N = 1, 2, 3 …; never reuse one, never write straight into the delivery location. The engine creates it, refuses a non-empty one (`scratch_not_empty` → next N) and refuses anything outside the working folder (`bad_scratch`). **Never delete files or folders** to make room |
+| Safe file names | `--file-name '<slug>-qr'`, where `<slug>` is the web address's host (`contoso.com`) or the code type (`wifi`, `contact`, `event`, `text`). Never pass a path, folder or a file name the user typed. The engine reduces the name to letters, digits, `.`, `-`, `_` (it reports the final `file_name`), and checks every file stays inside `<scratch>` — quoting alone doesn't stop `../` tricks |
 | Images | Standard: never view the PNG. Customize: view the final PNG ONCE, only if the look changed (shape, eyes, frame, logo, colors, caption); after a rerun view only the rerun. The style guide is for the user — don't inspect it |
 
 ## Platform notes
@@ -43,9 +44,9 @@ the details of a type the user explicitly asked for); every look-and-feel choice
 |---|---|---|
 | Questions | `core-AskUserQuestion` — one card per step; multi-select for Step 3b | ONE chat message per question, numbered options, recommended first; wait for the reply |
 | Finding uploads (logo, CSV) | `Glob input/**/*` and `Glob grounding/**/*` | Files attached in this conversation / the host's upload folder |
-| Scratch folder | `working/qr/<name>/` | A temp folder such as `qr_out/<name>/` |
+| Scratch folder | `<qr-root>` = `working/qr`; `<scratch>` = `working/qr/<slug>-run<N>` | `<qr-root>` = `qr_out` (inside the working folder); `<scratch>` = `qr_out/<slug>-run<N>` |
 | Showing the style guide | `mkdir -p working/qr/guide && cp '<skill-dir>/assets/qr-style-guide.png' working/qr/guide/`, then ONE `host-CopyArtifact(surface="output", source="working/qr/guide/qr-style-guide.png", destination="qr-style-guide.png", overwrite=true)` | Show it inline, or attach it |
-| Delivering files | ONE `host-CopyArtifact(surface="output", source="working/qr/<name>/<file>", destination="<file>")`, or for several files `source="working/qr/<name>", destination="<name>", recursive=true`. Retry the same call on "source not visible yet"; confirm with ONE `Glob output/**/*` | Return each file as an attachment. Only ONE file per response and several made → zip them (e.g. `qr_out/<name>-qr.zip`, paths single-quoted) in the generating command |
+| Delivering files | Deliver EXACTLY the JSON `file_names` (batch: every result's `file_names`), from `<scratch>`. One file: ONE `host-CopyArtifact(surface="output", source="<scratch>/<file>", destination="<file>")`. Several: ONE `host-CopyArtifact(surface="output", source="<scratch>", destination="<slug>-qr", recursive=true)` — only when the JSON says `folder_clean: true`; otherwise copy the listed files one by one. Check `copied` equals the number of listed files. Retry the same call on "source not visible yet"; confirm with ONE `Glob output/**/*` | Return each listed file as an attachment. Only ONE file per response and several made → zip exactly the listed files into `<scratch>.zip` (beside `<scratch>`, paths single-quoted) in the generating command |
 | Seeing images | The image viewer shows the agent only; the user sees delivered files | The delivered attachment is the preview |
 | Typical libraries | ReportLab: vector PDF, no scan verifier | Varies; PDF may be 300-dpi raster; may have a scan verifier |
 
@@ -107,7 +108,7 @@ straight to Customize with those items pre-ticked and still show them in 3b.
 | Phone call | Phone number | `--type phone --phone` |
 | Map location | Latitude, longitude (geocode only a user-given address; confirm) | `--type geo --lat --lon` |
 | Calendar event | Title, start, end (`20261015T190000`, or `20261015` for all-day — then the end is the day AFTER the last day), optional location. End must be after start | `--type event --summary --start --end --location` |
-| Bulk | Uploaded CSV (or XLSX, converted first — below); which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --outdir DIR` |
+| Bulk | Uploaded CSV (or XLSX, converted first — below); which column holds the data and which the file name | `--batch FILE.csv --data-column COL --name-column COL --scratch DIR` |
 
 Bulk: find the upload (ask if none); show the headers, ask for the two columns. Bare domains get `https://`; a bad
 or empty row doesn't stop the batch and is reported (never skipped). Every file name ends with its row number
@@ -117,7 +118,7 @@ as Windows text with a warning.
 **XLSX uploads** — the engine is CSV-only, so convert first, and ONLY if a reader is importable. Run this ONE command
 (paths passed as arguments, single-quoted); it never installs anything:
 ```bash
-mkdir -p '<scratch>' && python - '<upload>.xlsx' '<scratch>-sheet.csv' <<'PY'
+mkdir -p '<qr-root>' && python - '<upload>.xlsx' '<qr-root>/<slug>-sheet-run<N>.csv' <<'PY'
 import sys, csv
 src, dst = sys.argv[1], sys.argv[2]
 try:
@@ -140,39 +141,42 @@ PY
 ```
 | Result | Do |
 |---|---|
-| `CONVERTED` | Continue with `<scratch>-sheet.csv` — kept beside `<scratch>`, so that folder holds only QR files (first sheet only — say so if the workbook has several) |
+| `CONVERTED` | Continue with `<qr-root>/<slug>-sheet-run<N>.csv` — kept OUTSIDE `<scratch>`, which must stay empty for the engine (first sheet only — say so if the workbook has several) |
 | `NO_XLSX_READER` | Stop the bulk flow; don't guess or hand-parse. Say: "I can't open Excel files here. In Excel choose **File › Save As › CSV UTF-8 (Comma delimited)** and upload that file." |
 | `XLSX_UNREADABLE` | Same message, noting the file couldn't be opened (it may be damaged or password-protected) |
 
 Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (the engine returns `not_csv` for them).
 
 ### Step 4 — Generate, read JSON, deliver
-1. **Run** in ONE command. `--out` is a base path without extension (dots like `contoso.com-qr` are kept).
+1. **Run** in ONE command, into a NEW `<scratch>` (Engine rules → Fresh folder every run; a rerun uses the next
+   `-run<N>`). `--file-name` is a plain base name without extension (dots like `contoso.com-qr` are kept).
    Pass every user value safely (Engine rules → Safe commands): single quotes in a shell, `'` → `'\''`:
    ```bash
-   mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' --type url --url 'contoso.com' \
-     --format png --out '<scratch>/contoso.com-qr'
-   mkdir -p '<scratch>' && python '<skill-dir>/scripts/make_qr.py' --url 'contoso.com' --style fluid \
+   python '<skill-dir>/scripts/make_qr.py' --type url --url 'contoso.com' --format png \
+     --scratch 'working/qr/contoso.com-run1' --file-name 'contoso.com-qr'
+   python '<skill-dir>/scripts/make_qr.py' --url 'contoso.com' --style fluid \
      --eye-frame leaf --eye-center leaf --frame banner --frame-text 'SCAN ME' --logo '<logo>.png' \
      --logo-size small --fg logo --caption 'Visit Contoso'\''s open house' --format png,svg,pdf \
-     --out '<scratch>/contoso.com-qr'
+     --scratch 'working/qr/contoso.com-run2' --file-name 'contoso.com-qr'
    ```
    Where the host runs Python directly, use an argument list instead (no shell, no quoting needed):
    ```python
    import subprocess, sys
    r = subprocess.run([sys.executable, "<skill-dir>/scripts/make_qr.py", "--url", url, "--caption", caption,
-                       "--format", "png", "--out", out_base], capture_output=True, text=True)
+                       "--format", "png", "--scratch", scratch, "--file-name", slug + "-qr"],
+                      capture_output=True, text=True)
    ```
 2. **Read the JSON** printed on stdout:
 
    | Field | Meaning / what to do |
    |---|---|
-   | `files` | Paths written — deliver these by exact file name |
+   | `files` / `file_names` | Paths written / their plain names — deliver EXACTLY these, nothing else |
+   | `file_name`, `folder_clean` | Final (safe) base name; `true` = `<scratch>` holds only this run's files. `false` → deliver the listed files one by one (never the folder) |
    | `payload` | What the code contains; show it for Wi-Fi/vCard. A Wi-Fi password is already masked (`P:********`) — show as-is |
    | `warnings` | Explain each in plain words (list below) |
    | `readback_check` | `modules_obscured_pct` vs `error_correction_budget_pct` → `verdict` good / risky / likely to fail (corner eyes excluded). Risky or worse → offer `--logo-size small` and/or `--style square`, rerun |
    | `scan_verified` | `null` = no QR reader installed (estimate only). Else `{engine, decoded, matches_content}`; `false` = failure → offer square / smaller logo / more contrast, rerun |
-   | Batch | `{"rows", "count", "failed", "results"}` (`rows` = every data row; `count` + `failed` = `rows`); failed rows carry `row`, `name`, `error`, `message` (`missing_data` = empty cell) → report, offer to fix those rows |
+   | Batch | `{"rows", "count", "failed", "results", "folder_clean"}` (`rows` = every data row; `count` + `failed` = `rows`); failed rows carry `row`, `name`, `error`, `message` (`missing_data` = empty cell) → report, offer to fix those rows |
 
 3. **Errors** (exit code 2, `{"error": code, "message": "..."}`): relay the message in plain words, re-ask ONLY
    that item, rerun.
@@ -190,7 +194,9 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
    | `no_logo` | Use black, say so |
    | `too_long` | Ask for a shorter link or less text |
    | `bad_option` | An option is out of range or invalid (the message names it) — fix that value; if it came from the user, re-ask it |
-   | `cannot_write` | The output folder isn't writable — use a different scratch folder and rerun once; if it fails again, say so |
+   | `cannot_write` | The scratch folder isn't writable — rerun ONCE with the next `-run<N>`; if it fails again, say so |
+   | `scratch_not_empty` | The folder was already used — rerun with the next `-run<N>` (never empty or delete the old one) |
+   | `bad_scratch` | The folder path is unsafe or outside the working folder — rerun with `<qr-root>/<slug>-run<N>` exactly as in Platform notes |
    | `too_large` | Rerun with a smaller `--size` |
    | `internal_error` | Say something went wrong; rerun ONCE with the standard look. If it fails again, stop and tell the user (never show the `detail` field) |
    | `missing_encoder` / `missing_pillow` | "This environment can't make QR codes (a required image or QR library is missing)." Stop; ask nothing more (optionally one `--check` to confirm) |
@@ -200,7 +206,7 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
    "fg taken from logo: #…" (name it); "The SVG/PDF leaves out: …" (name each listed option; offer PNG for the styled version); PDF is a 300-dpi image (fine for print); failed
    scan test. Tiny caption text in the preview = no TrueType font here; say so.
 4. **Preview (Customize only):** follow the Images rule. If only SVG/PDF was chosen, add a PNG preview run in
-   the SAME command to a base outside `<scratch>` (e.g. `<scratch>/../preview/<name>`) and view that.
+   the SAME command into its own new folder `<scratch>-preview` (never inside `<scratch>`) and view that.
 5. **Deliver** every final file (not previews) per Platform notes. If a name is already taken in the delivery
    location, pick a new name and say so.
 6. **Test-scan reminder:** always say "Scan it with your phone camera before you print or share it."
@@ -208,7 +214,7 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
 ## Output
 - Chat: 3-6 bullets — what the code contains, exact file names, the readability verdict in plain words,
   warnings explained, and the test-scan reminder.
-- Files: `<name>.<ext>` per chosen format (bulk: one per row per format).
+- Files: `<file_name>.<ext>` per chosen format (bulk: one per row per format) — exactly the JSON `file_names`.
 
 ## Guardrails
 - Never generate before Step 1 is answered; always show what will be made before generating (Step 2 option /
@@ -220,6 +226,10 @@ Older `.xls`, `.ods` or `.numbers` files: ask for a CSV UTF-8 export directly (t
 - The payload already masks Wi-Fi passwords; never echo the `--password` value in chat, and never put
   passwords or other secrets in captions, frame text or file names.
 - Never silently overwrite a user's file in the delivery location.
+- Files go ONLY into a fresh `<qr-root>/<slug>-run<N>` folder — never a path or file name taken from the user, an
+  upload or a spreadsheet. Deliver only the files the JSON lists. Never delete files or folders.
+  If the user asks for a particular location or file name, use the safe name anyway and say: "I saved it as
+  `<file>` in its own folder — I can't write to locations you type, but you can rename it after downloading."
 - Never interpolate user values raw or in double quotes into a shell command — use an argument list, or single
   quotes with `'` written as `'\''` (Engine rules → Safe commands). This applies to every value and every command.
 - Never `pip install`. On a script error, relay the message in plain words — no tracebacks, and never
