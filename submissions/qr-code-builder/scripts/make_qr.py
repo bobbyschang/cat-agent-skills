@@ -59,7 +59,7 @@ RASTER = {"png", "jpg", "jpeg", "webp"}
 VECTOR = {"svg", "pdf"}
 
 # ---------- payload builders ----------
-def _esc(s):  # escaping for WIFI / MECARD style fields
+def _esc(s):  # escaping for WIFI: payload fields (\ ; , : ")
     return "".join("\\" + c if c in '\\;,:"' else c for c in (s or ""))
 
 def _vtext(s):
@@ -75,7 +75,7 @@ def _oneline(s):
 TYPE_LABELS = {"text": "plain-text", "wifi": "Wi-Fi", "vcard": "contact card", "email": "email",
                "phone": "phone-call", "sms": "text-message", "geo": "map-location", "event": "calendar-event"}
 
-FIELD_LABELS = {"text": "the text", "ssid": "the Wi-Fi network name", "password": "the Wi-Fi password",
+FIELD_LABELS = {"text": "the text", "ssid": "the Wi-Fi network name", "password": "the Wi-Fi password",  # nosec B105 - a field label, not a password
                 "name": "the contact's name", "email": "the email address", "phone": "the phone number",
                 "lat": "the latitude", "lon": "the longitude", "summary": "the event title",
                 "start": "the event start time", "end": "the event end time"}
@@ -436,7 +436,7 @@ def color_from_logo(path):
     if not counts:
         raise QRError("logo_unreadable", f"The logo \"{os.path.basename(path)}\" has no visible pixels (it's fully transparent), so its color can't be matched. Pick a color instead, or use a different logo.")
     best = None
-    for i, cnt in sorted(counts.items(), key=lambda kv: -kv[1]):
+    for i, _count in sorted(counts.items(), key=lambda kv: -kv[1]):
         r, g, b = pal[3 * i:3 * i + 3]
         lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
         if lum < 110:  # dark enough to scan on white
@@ -500,7 +500,8 @@ def render_svg(m, border, fg, bg, logo, logo_scale, path, size):
         out.append(f'<rect x="{x-0.6:.3f}" y="{y-0.6:.3f}" width="{w+1.2:.3f}" height="{h+1.2:.3f}" rx="0.6" fill="{plate}"/>')
         out.append(f'<image x="{x:.3f}" y="{y:.3f}" width="{w:.3f}" height="{h:.3f}" href="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>')
     out.append("</svg>")
-    open(path, "w").write("".join(out))
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("".join(out))
 
 def render_pdf(m, border, fg, bg, logo, logo_scale, path, size_pts, caption, notes=None):
     from reportlab.pdfgen import canvas
@@ -666,7 +667,10 @@ def read_safe_svg(path, name):
     return raw
 
 def _svg_fetch_inline_only(url, *args, **kwargs):
-    """cairosvg url_fetcher: decode inline bitmap data: URIs locally; refuse everything else (network, files, nested SVG)."""
+    """cairosvg url_fetcher: decode inline bitmap data: URIs locally; refuse everything else (network, files, nested SVG).
+    Returns raw BYTES - CairoSVG's own fetchers (cairosvg.url.fetch / safe_fetch) return bytes and its image
+    loader sniffs those bytes (PNG/JPEG/GIF/WEBP signature). The dict form (string/file_obj/mime_type) is
+    WeasyPrint's url_fetcher API, not CairoSVG's."""
     url = str(url).strip()
     if not _INLINE_RASTER.match(url) or "," not in url:
         raise ValueError("external resource blocked")
@@ -882,6 +886,7 @@ def make_one(data, a, scratch_real, file_name):
         raise QRError("size_too_small", f"--pdf-size {a.pdf_size:g} pt is too small for this much content: each square would be under {MIN_MODULE_PT:g} pt (about 0.35 mm). Use --pdf-size {need} or more (or shorten the content).")
     files = []
     raster_img = None
+    readback = None
     try:
         for f in fmts:
             path = safe_target(scratch_real, f"{file_name}.{f}")
@@ -917,7 +922,7 @@ def make_one(data, a, scratch_real, file_name):
         if isinstance(e, OSError):
             raise QRError("cannot_write", f"I couldn't save the QR code file ({e.strerror or e}). Check that the scratch folder is writable.")
         raise
-    rb = locals().get("readback")
+    rb = readback
     dc = None
     first_raster = next((p for p in files if p.rsplit(".", 1)[-1] in RASTER), None)
     if first_raster:
@@ -990,7 +995,8 @@ def read_csv_text(path):
     """Decode a CSV the way spreadsheets actually save it: UTF-8 (with or without BOM), else Windows-1252
     (Excel's classic "CSV (Comma delimited)"). Binary / non-text files raise bad_csv."""
     try:
-        raw = open(path, "rb").read()
+        with open(path, "rb") as fh:
+            raw = fh.read()
     except OSError as e:
         raise QRError("batch_not_found", f"I couldn't open the spreadsheet file \"{path}\" ({e.strerror or e}).")
     if b"\x00" in raw:
@@ -1017,29 +1023,28 @@ def run(a):
             cols = list(csv.DictReader(io.StringIO(text, newline="")).fieldnames or [])
         except csv.Error as e:
             raise QRError("bad_csv", f"The file couldn't be read as a CSV spreadsheet ({e}). Save it as \"CSV UTF-8 (Comma delimited)\" and upload it again.")
-        if True:
-            for col in [a.data_column] + ([a.name_column] if a.name_column else []):
-                if col not in cols:
-                    raise QRError("bad_column", f"The spreadsheet has no column named \"{col}\". Its columns are: {', '.join(cols) or '(none)'}.")
-            scratch_real = prepare_scratch(a.scratch)
-            for i, row in enumerate(rows, 1):
-                data = (row.get(a.data_column) or "").strip()
-                name = ((row.get(a.name_column) or "") if a.name_column else "").strip()
-                if not data:
-                    results.append({"row": i, "name": name, "error": "missing_data",
-                                    "message": f"Row {i} has nothing in the \"{a.data_column}\" column, so no QR code was made for it."})
-                    continue
-                # Row number keeps every file name unique (a/b and a?b no longer collide);
-                # names that sanitize to nothing fall back to qr_<row>.
-                safe = re.sub(r"_+", "_", "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)).strip("_-")[:60]
-                safe = f"{safe}_{i:03d}" if safe else f"qr_{i:03d}"
-                try:
-                    if a.type == "url" and not data.lower().startswith(BATCH_RAW_SCHEMES):
-                        data = normalize_url(data)  # bare domains AND http(s) links: same checks as a single link
-                    res = make_one(data, a, scratch_real, safe)
-                    results.append({"row": i, "name": name, **res})
-                except QRError as e:
-                    results.append({"row": i, "name": name, "error": e.code, "message": e.message})
+        for col in [a.data_column] + ([a.name_column] if a.name_column else []):
+            if col not in cols:
+                raise QRError("bad_column", f"The spreadsheet has no column named \"{col}\". Its columns are: {', '.join(cols) or '(none)'}.")
+        scratch_real = prepare_scratch(a.scratch)
+        for i, row in enumerate(rows, 1):
+            data = (row.get(a.data_column) or "").strip()
+            name = ((row.get(a.name_column) or "") if a.name_column else "").strip()
+            if not data:
+                results.append({"row": i, "name": name, "error": "missing_data",
+                                "message": f"Row {i} has nothing in the \"{a.data_column}\" column, so no QR code was made for it."})
+                continue
+            # Row number keeps every file name unique (a/b and a?b no longer collide);
+            # names that sanitize to nothing fall back to qr_<row>.
+            safe = re.sub(r"_+", "_", "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)).strip("_-")[:60]
+            safe = f"{safe}_{i:03d}" if safe else f"qr_{i:03d}"
+            try:
+                if a.type == "url" and not data.lower().startswith(BATCH_RAW_SCHEMES):
+                    data = normalize_url(data)  # bare domains AND http(s) links: same checks as a single link
+                res = make_one(data, a, scratch_real, safe)
+                results.append({"row": i, "name": name, **res})
+            except QRError as e:
+                results.append({"row": i, "name": name, "error": e.code, "message": e.message})
         ok = sum(1 for r in results if "error" not in r)
         out = {"rows": len(results), "count": ok, "failed": len(results) - ok, "results": results}
         out.update(folder_report(scratch_real, [p for r in results for p in r.get("files", [])]))

@@ -3,7 +3,7 @@
 Point it at a link and you get a scannable QR code. Add a logo, a caption, a
 frame, or your brand colors if you want one that looks like it belongs on your
 flyer. It also handles QR code variations: Wi-Fi network, contact card
-(vCard/MECARD), email, SMS, phone number, map pin, and calendar event.
+(vCard), email, SMS, phone number, map pin, and calendar event.
 
 ## What you get
 
